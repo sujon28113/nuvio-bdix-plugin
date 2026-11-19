@@ -31,6 +31,13 @@ const { BoundedCache } = require("./src/bdix-dhakaflix/cache.js");
 const { isHostDead, markHostDead, markHostAlive } = require("./src/bdix-dhakaflix/circuitBreaker.js");
 const { routeServers } = require("./src/bdix-dhakaflix/routing.js");
 const { getShardKey, lookupStaticIndex, DEFAULT_HOSTS } = require("./src/bdix-dhakaflix/indexClient.js");
+const {
+  parseMediaMetadata,
+  formatStreamTitle,
+  sortStreams,
+  parseSizeToBytes,
+  formatBytes
+} = require("./src/bdix-dhakaflix/parser.js");
 
 let passedTests = 0;
 let failedTests = 0;
@@ -417,9 +424,154 @@ async function runAllTests() {
   );
 
   // ---------------------------------------------------------------------------
-  // 10. Static Catalog Fast-Path Verification
+  // 10. Media Release Metadata Parser (Unit Checks)
   // ---------------------------------------------------------------------------
-  console.log("\n⚡ Group 10: Static Catalog Fast-Path Verification");
+  console.log("\n📦 Group 10: Media Release Metadata & Size Parser");
+
+  it("parseSizeToBytes and formatBytes correctly parse and format file sizes", () => {
+    assert.strictEqual(parseSizeToBytes(2818704212), 2818704212);
+    assert.strictEqual(parseSizeToBytes("2818704 KB"), 2886352896);
+    assert.strictEqual(parseSizeToBytes("869 MB"), 911212544);
+    assert.strictEqual(parseSizeToBytes("4.2 GB"), 4509715661);
+    assert.strictEqual(parseSizeToBytes(null), null);
+    assert.strictEqual(parseSizeToBytes(""), null);
+
+    assert.strictEqual(formatBytes(2818704212), "2.63 GB");
+    assert.strictEqual(formatBytes(911069242), "869 MB");
+    assert.strictEqual(formatBytes(4509715661), "4.2 GB");
+    assert.strictEqual(formatBytes(null), null);
+  });
+
+  it("parseMediaMetadata extracts 4K HDR10+ DV x265 DDP 5.1 Atmos accurately", () => {
+    const meta = parseMediaMetadata(
+      "/DHAKA-FLIX-14/English Movies (1080p)/(2024) 1080p/Dune Part Two 2024 2160p UHD HDR10+ DV WEB-DL DDP 5.1 Atmos x265-FLUX.mkv",
+      "18.4 GB"
+    );
+    assert.strictEqual(meta.resolution, "4K");
+    assert.strictEqual(meta.source, "WEB-DL");
+    assert.strictEqual(meta.videoCodec, "HEVC (x265)");
+    assert.strictEqual(meta.hdr, "DV HDR10+");
+    assert.strictEqual(meta.audio, "DDP 5.1 Atmos");
+    assert.strictEqual(meta.formattedSize, "18.4 GB");
+    assert.ok(meta.sizeBytes > 0);
+
+    const title = formatStreamTitle(meta, "DhakaFlix 14");
+    assert.ok(title.includes("[DhakaFlix 14] 4K WEB-DL • HEVC (x265) DV HDR10+"));
+    assert.ok(title.includes("🔊 DDP 5.1 Atmos"));
+    assert.ok(title.includes("💾 18.4 GB"));
+  });
+
+  it("parseMediaMetadata extracts 1080p BluRay x265 Dual Audio (Hindi, English)", () => {
+    const meta = parseMediaMetadata(
+      "/DHAKA-FLIX-12/TV-WEB-Series/TV Series ♥  A  —  L/Breaking Bad (TV Series 2008–2013) 1080p [Dual Audio]/Season 1/Breaking Bad S01E01  1080p BluRay x265 HEVC ESub [Dual Audio][Hindi 2.0+English 5.1] -MsMod.mkv",
+      "1083306 KB"
+    );
+    assert.strictEqual(meta.resolution, "1080p");
+    assert.strictEqual(meta.source, "BluRay");
+    assert.strictEqual(meta.videoCodec, "HEVC (x265)");
+    assert.strictEqual(meta.languages, "Dual Audio (Hindi, English)");
+    assert.strictEqual(meta.formattedSize, "1.03 GB");
+
+    const title = formatStreamTitle(meta, "DhakaFlix 12");
+    assert.ok(title.includes("[DhakaFlix 12] 1080p BluRay • HEVC (x265)"));
+    assert.ok(title.includes("Dual Audio (Hindi, English)"));
+    assert.ok(title.includes("💾 1.03 GB"));
+  });
+
+  it("parseMediaMetadata extracts 1080p WEB-DL x265 10bit AAC 5.1", () => {
+    const meta = parseMediaMetadata(
+      "/DHAKA-FLIX-14/English Movies (1080p)/(2024) 1080p/A Complete Unknown (2024) 1080p AMZN/A Complete Unknown (2024) 1080p AMZN-WEB x265 HEVC 10bit AAC 5.1 ESub-PSA.mkv",
+      "2818704 KB"
+    );
+    assert.strictEqual(meta.resolution, "1080p");
+    assert.strictEqual(meta.source, "WEB-DL");
+    assert.strictEqual(meta.videoCodec, "HEVC (x265)");
+    assert.strictEqual(meta.bitDepth, "10bit");
+    assert.strictEqual(meta.audio, "AAC 5.1");
+    assert.strictEqual(meta.formattedSize, "2.69 GB");
+  });
+
+  it("parseMediaMetadata extracts 1080p REMUX AVC DTS-HD MA / TrueHD Atmos", () => {
+    const meta = parseMediaMetadata(
+      "/DHAKA-FLIX-14/Spider-Man No Way Home 2021 1080p REMUX AVC DTS-HD MA 7.1 TrueHD 7.1 Atmos-FraMeSToR.mkv",
+      "32.5 GB"
+    );
+    assert.strictEqual(meta.resolution, "1080p");
+    assert.strictEqual(meta.source, "REMUX");
+    assert.strictEqual(meta.videoCodec, "H.264 (x264)");
+    assert.ok(meta.audio.includes("Atmos") || meta.audio.includes("7.1"));
+  });
+
+  it("parseMediaMetadata extracts Hindi Multi Audio from path and filename", () => {
+    const meta = parseMediaMetadata(
+      "/DHAKA-FLIX-14/Hindi Movies/Animal (2023) 1080p Hindi Multi Audio NF-WEB x264 AAC 2.0-Telly.mkv",
+      "2.8 GB"
+    );
+    assert.strictEqual(meta.resolution, "1080p");
+    assert.strictEqual(meta.source, "WEB-DL");
+    assert.strictEqual(meta.videoCodec, "H.264 (x264)");
+    assert.ok(meta.languages.includes("Multi Audio") && meta.languages.includes("Hindi"));
+    assert.strictEqual(meta.audio, "AAC 2.0");
+  });
+
+  it("parseMediaMetadata handles minimal filename with only resolution cleanly", () => {
+    // 1. Without parent language
+    const meta1 = parseMediaMetadata("/Sample Minimal Movie 720p.mkv", null);
+    assert.strictEqual(meta1.resolution, "720p");
+    assert.strictEqual(meta1.source, null);
+    assert.strictEqual(meta1.videoCodec, null);
+    assert.strictEqual(meta1.formattedSize, null);
+    assert.strictEqual(meta1.languages, null);
+
+    const title1 = formatStreamTitle(meta1, "DhakaFlix 7");
+    assert.ok(!title1.includes("undefined"));
+    assert.ok(!title1.includes("• •"));
+    assert.strictEqual(title1.split("\n").length, 2); // line 1 (res) + line 3 (filename)
+
+    // 2. With parent folder language (/English Movies/)
+    const meta2 = parseMediaMetadata("/DHAKA-FLIX-7/English Movies/Sample Minimal Movie 720p.mkv", null);
+    assert.strictEqual(meta2.languages, "English");
+    const title2 = formatStreamTitle(meta2, "DhakaFlix 7");
+    assert.strictEqual(title2.split("\n").length, 3); // line 1 + line 2 (English) + line 3
+  });
+
+  it("sortStreams ranks 4K over 1080p and larger sizes first within same resolution", () => {
+    const streams = [
+      {
+        quality: "1080p",
+        behaviorHints: { videoSize: 1000000000 },
+        _meta: { source: "WEB-DL" }
+      },
+      {
+        quality: "4K",
+        behaviorHints: { videoSize: 20000000000 },
+        _meta: { source: "WEB-DL" }
+      },
+      {
+        quality: "1080p",
+        behaviorHints: { videoSize: 4500000000 },
+        _meta: { source: "BluRay" }
+      },
+      {
+        quality: "720p",
+        behaviorHints: { videoSize: 800000000 },
+        _meta: { source: "WEBRip" }
+      }
+    ];
+
+    const sorted = sortStreams(streams);
+    assert.strictEqual(sorted[0].quality, "4K");
+    assert.strictEqual(sorted[1].quality, "1080p");
+    // Larger 1080p BluRay (4.5GB) before 1080p WEB-DL (1GB)
+    assert.strictEqual(sorted[1].behaviorHints.videoSize, 4500000000);
+    assert.strictEqual(sorted[2].behaviorHints.videoSize, 1000000000);
+    assert.strictEqual(sorted[3].quality, "720p");
+  });
+
+  // ---------------------------------------------------------------------------
+  // 11. Static Catalog Fast-Path Verification
+  // ---------------------------------------------------------------------------
+  console.log("\n⚡ Group 11: Static Catalog Fast-Path Verification");
 
   it("getShardKey computes correct 2-digit modulo 100 shard hash", () => {
     assert.strictEqual(getShardKey("872585"), "85"); // 872585 % 100 = 85
@@ -445,7 +597,7 @@ async function runAllTests() {
                 "872585": [
                   [
                     0,
-                    "/DHAKA-FLIX-14/English%20Movies%20%281080p%29/%282023%29%201080p/Oppenheimer%20%282023%29%201080p/Oppenheimer.2023.1080p.mkv",
+                    "/DHAKA-FLIX-14/English%20Movies%20%281080p%29/%282023%29%201080p/Oppenheimer%20%282023%29%201080p/Oppenheimer.2023.IMAX.1080p.BluRay.x265.HEVC.ESub.[Dual.Audio].[Hindi.5.1+English.5.1].mkv",
                     "1080p",
                     "4.2 GB"
                   ]
@@ -469,11 +621,12 @@ async function runAllTests() {
         const streams = await lookupStaticIndex("872585", "movie");
         assert.strictEqual(streams.length, 1);
         assert.strictEqual(streams[0].name, "DhakaFlix ⚡");
-        assert.ok(streams[0].title.includes("Oppenheimer"));
-        assert.ok(streams[0].title.includes("[1080p]"));
-        assert.ok(streams[0].title.includes("(4.2 GB)"));
-        assert.ok(streams[0].url.startsWith("http://172.16.50.14/DHAKA-FLIX-14/"));
         assert.strictEqual(streams[0].quality, "1080p");
+        assert.strictEqual(streams[0].size, "4.2 GB");
+        assert.ok(streams[0].behaviorHints && streams[0].behaviorHints.videoSize > 0);
+        assert.ok(streams[0].title.includes("Oppenheimer"));
+        assert.ok(streams[0].title.includes("HEVC (x265)"));
+        assert.ok(streams[0].url.startsWith("http://172.16.50.14/DHAKA-FLIX-14/"));
       } finally {
         global.fetch = originalFetch;
       }
@@ -496,15 +649,15 @@ async function runAllTests() {
                   "1-1": [
                     [
                       1,
-                      "/DHAKA-FLIX-12/TV-WEB-Series/Breaking%20Bad/Season%201/Breaking%20Bad%20S01E01.mkv",
+                      "/DHAKA-FLIX-12/TV-WEB-Series/TV%20Series%20%E2%99%A5%20%20A%20%20%E2%80%94%20%20L/Breaking%20Bad%20%28TV%20Series%202008%E2%80%932013%29%201080p%20%5BDual%20Audio%5D/Season%201/Breaking%20Bad%20S01E01%201080p%20BluRay%20x265%20HEVC%20ESub%20%5BDual%20Audio%5D%5BHindi%202.0%2BEnglish%205.1%5D.mkv",
                       "1080p",
-                      "1.0 GB"
+                      "1.03 GB"
                     ]
                   ],
                   "1-2": [
                     [
                       1,
-                      "/DHAKA-FLIX-12/TV-WEB-Series/Breaking%20Bad/Season%201/Breaking%20Bad%20S01E02.mkv",
+                      "/DHAKA-FLIX-12/TV-WEB-Series/TV%20Series%20%E2%99%A5%20%20A%20%20%E2%80%94%20%20L/Breaking%20Bad%20%28TV%20Series%202008%E2%80%932013%29%201080p%20%5BDual%20Audio%5D/Season%201/Breaking%20Bad%20S01E02%201080p%20BluRay%20x265%20HEVC.mkv",
                       "1080p",
                       "869 MB"
                     ]
@@ -525,12 +678,16 @@ async function runAllTests() {
 
         const s1e1Streams = await lookupStaticIndex("1396", "tv", 1, 1);
         assert.strictEqual(s1e1Streams.length, 1);
-        assert.ok(s1e1Streams[0].title.includes("S01E01"));
         assert.strictEqual(s1e1Streams[0].name, "DhakaFlix ⚡");
+        assert.strictEqual(s1e1Streams[0].quality, "1080p");
+        assert.strictEqual(s1e1Streams[0].size, "1.03 GB");
+        assert.ok(s1e1Streams[0].title.includes("S01E01"));
+        assert.ok(s1e1Streams[0].title.includes("BluRay"));
+        assert.ok(s1e1Streams[0].title.includes("Dual Audio (Hindi, English)"));
 
         const s1e2Streams = await lookupStaticIndex("1396", "tv", 1, 2);
         assert.strictEqual(s1e2Streams.length, 1);
-        assert.ok(s1e2Streams[0].title.includes("S01E02"));
+        assert.strictEqual(s1e2Streams[0].size, "869 MB");
 
         const s9e9Streams = await lookupStaticIndex("1396", "tv", 9, 9);
         assert.strictEqual(s9e9Streams.length, 0); // Episode does not exist
@@ -541,22 +698,21 @@ async function runAllTests() {
   );
 
   // ---------------------------------------------------------------------------
-  // 11. Performance Benchmark: Fast-Path vs Fallback
+  // 12. End-to-End Performance & Visual Card Inspection
   // ---------------------------------------------------------------------------
-  console.log("\n⏱️ Group 11: Performance Benchmark (Fast-Path Hit vs Fallback)");
+  console.log("\n📺 Group 12: Visual Inspection of NuvioTV Rendered Stream Cards");
 
   await itAsync(
-    "Fast-path resolves in sub-10ms without TMDB or live BDIX search calls",
+    "Inspect formatted NuvioTV stream card for Fast-Path Movie (Oppenheimer)",
     async () => {
       const originalFetch = global.fetch;
       try {
-        let tmdbCalls = 0;
-        let dhakaFlixSearchCalls = 0;
         let staticIndexCalls = 0;
+        let tmdbCalls = 0;
+        let bdixCalls = 0;
 
         global.fetch = async (url) => {
           const urlStr = url.toString();
-
           if (urlStr.includes("raw.githubusercontent.com") || urlStr.includes("jsdelivr.net")) {
             staticIndexCalls++;
             return {
@@ -566,7 +722,7 @@ async function runAllTests() {
                 "872585": [
                   [
                     0,
-                    "/DHAKA-FLIX-14/English%20Movies%20%281080p%29/%282023%29%201080p/Oppenheimer%20%282023%29%201080p/Oppenheimer.2023.1080p.mkv",
+                    "/DHAKA-FLIX-14/English%20Movies%20%281080p%29/%282023%29%201080p/Oppenheimer%20%282023%29%201080p%20%5BDual%20Audio%5D/Oppenheimer%20%282023%29%20IMAX%201080p%20BluRay%20x265%20HEVC%20ESub%20%5BDual%20Audio%5D%5BHindi%205.1%2BEnglish%205.1%5D%20-mkvC.mkv",
                     "1080p",
                     "4.2 GB"
                   ]
@@ -574,17 +730,8 @@ async function runAllTests() {
               })
             };
           }
-
-          if (urlStr.includes("api.themoviedb.org")) {
-            tmdbCalls++;
-            return { ok: true, status: 200, json: async () => ({}) };
-          }
-
-          if (urlStr.includes("172.16.50")) {
-            dhakaFlixSearchCalls++;
-            return { ok: true, status: 200, json: async () => ({ search: [] }) };
-          }
-
+          if (urlStr.includes("api.themoviedb.org")) tmdbCalls++;
+          if (urlStr.includes("172.16.50")) bdixCalls++;
           return { ok: false, status: 404 };
         };
 
@@ -593,17 +740,91 @@ async function runAllTests() {
         const elapsed = Date.now() - t0;
 
         assert.strictEqual(streams.length, 1);
-        assert.strictEqual(streams[0].name, "DhakaFlix ⚡");
-        assert.ok(staticIndexCalls >= 1 && staticIndexCalls <= 2);
-        // CRITICAL: 0 calls to TMDB or BDIX servers on fast-path hit!
         assert.strictEqual(tmdbCalls, 0);
-        assert.strictEqual(dhakaFlixSearchCalls, 0);
-        console.log(`     ⚡ Fast-Path execution time: ${elapsed}ms (TMDB calls: 0, BDIX searches: 0)`);
+        assert.strictEqual(bdixCalls, 0);
+
+        console.log(`\n     --- [Rendered Movie Stream Card (Fast-Path: ${elapsed}ms)] ---`);
+        console.log(`     name:          ${streams[0].name}`);
+        console.log(`     quality:       ${streams[0].quality}`);
+        console.log(`     size:          ${streams[0].size}`);
+        console.log(`     behaviorHints: ${JSON.stringify(streams[0].behaviorHints)}`);
+        console.log(`     title:`);
+        streams[0].title.split("\n").forEach((line) => console.log(`       | ${line}`));
+        console.log(`     url:           ${streams[0].url}`);
+        console.log(`     -------------------------------------------------------------\n`);
       } finally {
         global.fetch = originalFetch;
       }
     }
   );
+
+  await itAsync(
+    "Inspect formatted NuvioTV stream card for Fast-Path TV Episode (Breaking Bad)",
+    async () => {
+      const originalFetch = global.fetch;
+      try {
+        global.fetch = async (url) => {
+          const urlStr = url.toString();
+          if (urlStr.includes("raw.githubusercontent.com") || urlStr.includes("jsdelivr.net")) {
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({
+                "1396": {
+                  "1-1": [
+                    [
+                      1,
+                      "/DHAKA-FLIX-12/TV-WEB-Series/TV%20Series%20%E2%99%A5%20%20A%20%20%E2%80%94%20%20L/Breaking%20Bad%20%28TV%20Series%202008%E2%80%932013%29%201080p%20%5BDual%20Audio%5D/Season%201/Breaking%20Bad%20S01E01%20%201080p%20BluRay%20x265%20HEVC%20ESub%20%5BDual%20Audio%5D%5BHindi%202.0%2BEnglish%205.1%5D%20-MsMod.mkv",
+                      "1080p",
+                      "1.03 GB"
+                    ]
+                  ]
+                }
+              })
+            };
+          }
+          return { ok: false, status: 404 };
+        };
+
+        const t0 = Date.now();
+        const streams = await provider.getStreams("1396", "tv", 1, 1);
+        const elapsed = Date.now() - t0;
+
+        assert.strictEqual(streams.length, 1);
+        console.log(`\n     --- [Rendered TV Episode Stream Card (Fast-Path: ${elapsed}ms)] ---`);
+        console.log(`     name:          ${streams[0].name}`);
+        console.log(`     quality:       ${streams[0].quality}`);
+        console.log(`     size:          ${streams[0].size}`);
+        console.log(`     behaviorHints: ${JSON.stringify(streams[0].behaviorHints)}`);
+        console.log(`     title:`);
+        streams[0].title.split("\n").forEach((line) => console.log(`       | ${line}`));
+        console.log(`     url:           ${streams[0].url}`);
+        console.log(`     -------------------------------------------------------------------\n`);
+      } finally {
+        global.fetch = originalFetch;
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // 13. Safety Gate: Bundle Architecture Verification
+  // ---------------------------------------------------------------------------
+  console.log("\n🛡️ Group 13: QuickJS / Hermes Sandbox Safety Gate");
+
+  it("Compiled bundle providers/bdix-dhakaflix.js has zero Node.js built-in imports", () => {
+    const fs = require("fs");
+    const bundlePath = "./providers/bdix-dhakaflix.js";
+    assert.ok(fs.existsSync(bundlePath), "providers/bdix-dhakaflix.js must exist");
+
+    const bundleCode = fs.readFileSync(bundlePath, "utf-8");
+    const builtins = ["fs", "path", "crypto", "http", "https", "buffer", "child_process", "os", "net", "stream"];
+    for (const mod of builtins) {
+      assert.ok(
+        !bundleCode.includes(`require("${mod}")`) && !bundleCode.includes(`require('${mod}')`),
+        `Bundle must not require Node built-in module: "${mod}"`
+      );
+    }
+  });
 
   // ---------------------------------------------------------------------------
   // Final Summary

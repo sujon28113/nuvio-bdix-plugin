@@ -13,6 +13,7 @@
 
 import { USER_AGENT, DEBUG } from "./constants.js";
 import { normalizeStreamUrl, nameFromUrl, cleanFileName } from "./utils.js";
+import { parseMediaMetadata, formatStreamTitle, sortStreams } from "./parser.js";
 import { BoundedCache } from "./cache.js";
 
 // =============================================================================
@@ -226,28 +227,44 @@ export async function lookupStaticIndex(tmdbId, mediaType = "movie", season = nu
 
       const host = hosts[hostIndex] || DEFAULT_HOSTS[hostIndex] || "http://172.16.50.14";
       const serverName = SERVER_NAMES[host] || `DhakaFlix`;
-      const fileName = nameFromUrl(relativePath);
-      const cleaned = cleanFileName(fileName);
       const directUrl = normalizeStreamUrl(host, relativePath);
-      const sizeStr = size ? ` (${size})` : "";
 
-      streams.push({
+      // Parse rich release metadata dynamically from relativePath and shard size
+      const meta = parseMediaMetadata(relativePath, size);
+      if (quality && meta.resolution === "HD" && quality !== "HD") {
+        meta.resolution = quality;
+      }
+
+      const streamObj = {
         name: "DhakaFlix ⚡",
-        title: `[${serverName}] ${cleaned} [${quality}]${sizeStr}`,
+        title: formatStreamTitle(meta, serverName),
         url: directUrl,
-        quality: quality,
+        quality: meta.resolution,
         headers: {
           "User-Agent": USER_AGENT,
           "Referer": `${host}/`
-        }
-      });
+        },
+        behaviorHints: {
+          filename: meta.filename
+        },
+        _meta: meta
+      };
+
+      if (meta.formattedSize) {
+        streamObj.size = meta.formattedSize;
+      }
+      if (meta.sizeBytes) {
+        streamObj.behaviorHints.videoSize = meta.sizeBytes;
+      }
+
+      streams.push(streamObj);
     }
 
     if (DEBUG) {
       console.log(`[DhakaFlix Index] ⚡ HIT! Discovered ${streams.length} stream(s) for ${type} ${tmdbId} in ~150ms.`);
     }
 
-    return streams;
+    return sortStreams(streams);
   } catch (err) {
     if (DEBUG) console.log(`[DhakaFlix Index] Lookup error: ${err.message}`);
     return [];

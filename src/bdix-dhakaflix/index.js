@@ -23,6 +23,7 @@ import { USER_AGENT, DEBUG } from "./constants.js";
 import { lookupStaticIndex } from "./indexClient.js";
 import { getTmdbMetadata } from "./tmdb.js";
 import { routeServers } from "./routing.js";
+import { parseMediaMetadata, formatStreamTitle, sortStreams } from "./parser.js";
 import {
   generateSearchQueries,
   nameFromUrl,
@@ -163,7 +164,7 @@ async function getStreams(tmdbId, mediaType = "movie", season = null, episode = 
     }
 
     if (DEBUG) console.log(`[DhakaFlix] Discovered ${allStreams.length} stream(s)`);
-    return allStreams;
+    return sortStreams(allStreams);
   } catch (error) {
     console.error(`[DhakaFlix] Unexpected error in getStreams: ${error.message}`);
     return [];
@@ -269,7 +270,7 @@ async function processMovieItems(server, items, meta, streams) {
     // Case A: Direct video file returned by h5ai search
     if (isVideoFile(item.href)) {
       if (isTitleMatch(rawName, meta.title, meta.year, "movie")) {
-        addStreamResult(server, streams, rawName, item.href);
+        addStreamResult(server, streams, rawName, item.href, item.size);
       }
       continue;
     }
@@ -299,7 +300,7 @@ async function processMovieItems(server, items, meta, streams) {
       if (res.status === "fulfilled" && res.value && Array.isArray(res.value.files)) {
         for (const file of res.value.files) {
           if (isVideoFile(file.href)) {
-            addStreamResult(server, streams, file.name, file.href);
+            addStreamResult(server, streams, file.name, file.href, file.size);
           }
         }
       }
@@ -333,7 +334,7 @@ async function processTvItems(
         matchesEpisodeFile(rawName, targetSeason, targetEpisode, false) &&
         isTitleMatch(rawName, meta.title, null, "tv")
       ) {
-        addStreamResult(server, streams, rawName, item.href);
+        addStreamResult(server, streams, rawName, item.href, item.size);
       }
     }
   }
@@ -489,7 +490,7 @@ function matchAndAddEpisode(
   // 1. Explicit regex matching
   for (const file of files) {
     if (matchesEpisodeFile(file.name, targetSeason, targetEpisode, isInSeasonFolder)) {
-      addStreamResult(server, streams, file.name, file.href);
+      addStreamResult(server, streams, file.name, file.href, file.size);
     }
   }
 
@@ -500,7 +501,7 @@ function matchAndAddEpisode(
     );
     const file = sortedFiles[targetEpisode - 1];
     if (file) {
-      addStreamResult(server, streams, file.name, file.href);
+      addStreamResult(server, streams, file.name, file.href, file.size);
     }
   }
 }
@@ -508,23 +509,33 @@ function matchAndAddEpisode(
 /**
  * Formats and pushes a stream object into results array.
  */
-function addStreamResult(server, streams, fileName, fileHref) {
-  const quality = parseQuality(fileName);
-  const mediaTags = extractMediaTags(fileName);
-  const tagInfo = mediaTags.length > 0 ? ` [${mediaTags.join(" | ")}]` : "";
-  const cleaned = cleanFileName(fileName);
+function addStreamResult(server, streams, fileName, fileHref, sizeInput = null) {
+  const meta = parseMediaMetadata(fileHref, sizeInput);
   const directUrl = normalizeStreamUrl(server.mainUrl, fileHref);
 
-  streams.push({
+  const streamObj = {
     name: "DhakaFlix",
-    title: `[${server.name}] ${cleaned} [${quality}]${tagInfo}`,
+    title: formatStreamTitle(meta, server.name),
     url: directUrl,
-    quality: quality,
+    quality: meta.resolution,
     headers: {
       "User-Agent": USER_AGENT,
       "Referer": `${server.mainUrl}/`
-    }
-  });
+    },
+    behaviorHints: {
+      filename: meta.filename
+    },
+    _meta: meta
+  };
+
+  if (meta.formattedSize) {
+    streamObj.size = meta.formattedSize;
+  }
+  if (meta.sizeBytes) {
+    streamObj.behaviorHints.videoSize = meta.sizeBytes;
+  }
+
+  streams.push(streamObj);
 }
 
 module.exports = { getStreams };

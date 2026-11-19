@@ -1,6 +1,6 @@
 /**
  * bdix-dhakaflix - Built for Nuvio
- * Generated: 2026-11-19T12:07:46.470Z
+ * Generated: 2026-11-19T12:27:53.665Z
  */
 var __async = (__this, __arguments, generator) => {
   return new Promise((resolve, reject) => {
@@ -117,49 +117,6 @@ function isVideoFile(pathOrName) {
   const clean = pathOrName.split("?")[0].split("#")[0].toLowerCase();
   return VIDEO_EXTENSIONS.some((ext) => clean.endsWith(ext));
 }
-function parseQuality(name) {
-  if (!name) return "HD";
-  const upper = name.toUpperCase();
-  if (upper.includes("2160P") || upper.includes("4K") || upper.includes("UHD")) {
-    return "4K";
-  }
-  if (upper.includes("1080P") || upper.includes("FHD")) {
-    return "1080p";
-  }
-  if (upper.includes("720P")) {
-    return "720p";
-  }
-  if (upper.includes("480P") || upper.includes("SD")) {
-    return "480p";
-  }
-  if (upper.includes("CAM") || upper.includes("HDCAM") || upper.includes("TELESYNC") || upper.includes("TC")) {
-    return "CAM";
-  }
-  return "HD";
-}
-function extractMediaTags(name) {
-  if (!name) return [];
-  const tags = [];
-  const lower = name.toLowerCase();
-  if (lower.includes("dual") || lower.includes("multi")) {
-    tags.push("Dual Audio");
-  } else if (lower.includes("dubbed") || lower.includes("hindi dub")) {
-    tags.push("Dubbed");
-  }
-  if (lower.includes("esub") || lower.includes("subbed")) {
-    tags.push("ESub");
-  }
-  if (lower.includes("hevc") || lower.includes("x265")) {
-    tags.push("HEVC");
-  }
-  if (lower.includes("10bit")) {
-    tags.push("10bit");
-  }
-  if (lower.includes("hdr")) {
-    tags.push("HDR");
-  }
-  return tags;
-}
 function cleanFileName(fileName) {
   if (!fileName) return "Direct Video Stream";
   let name = fileName;
@@ -226,6 +183,280 @@ function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
       clearTimeout(timer);
       reject(err);
     });
+  });
+}
+
+// src/bdix-dhakaflix/parser.js
+function parseSizeToBytes(sizeInput) {
+  if (typeof sizeInput === "number" && !isNaN(sizeInput) && sizeInput > 0) {
+    return Math.round(sizeInput);
+  }
+  if (typeof sizeInput !== "string") return null;
+  const clean = sizeInput.trim().replace(/,/g, "");
+  const match = clean.match(/^([0-9.]+)\s*([KMGT]?B?)$/i);
+  if (!match) return null;
+  const val = parseFloat(match[1]);
+  if (isNaN(val) || val <= 0) return null;
+  const unit = (match[2] || "").toUpperCase();
+  if (unit === "TB" || unit === "T") {
+    return Math.round(val * 1024 * 1024 * 1024 * 1024);
+  }
+  if (unit === "GB" || unit === "G") {
+    return Math.round(val * 1024 * 1024 * 1024);
+  }
+  if (unit === "MB" || unit === "M") {
+    return Math.round(val * 1024 * 1024);
+  }
+  if (unit === "KB" || unit === "K") {
+    return Math.round(val * 1024);
+  }
+  if (val > 1e5) {
+    return Math.round(val);
+  }
+  return null;
+}
+function formatBytes(bytes) {
+  if (typeof bytes !== "number" || isNaN(bytes) || bytes <= 0) return null;
+  const gb = bytes / (1024 * 1024 * 1024);
+  if (gb >= 1) {
+    const formatted = gb >= 10 ? gb.toFixed(1) : gb.toFixed(2);
+    return `${parseFloat(formatted)} GB`;
+  }
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1) {
+    return `${Math.round(mb)} MB`;
+  }
+  const kb = bytes / 1024;
+  return `${Math.round(kb)} KB`;
+}
+function parseMediaMetadata(filePathOrUrl, sizeInput = null) {
+  let fullPath = filePathOrUrl || "";
+  try {
+    fullPath = decodeURIComponent(fullPath);
+  } catch (e) {
+  }
+  const rawFileName = nameFromUrl(fullPath);
+  const searchStr = fullPath.toLowerCase();
+  const fileStr = rawFileName.toLowerCase();
+  let resolution = "HD";
+  if (/\b(2160p|4k|uhd)\b/i.test(searchStr)) {
+    resolution = "4K";
+  } else if (/\b(1080p|1080i|fhd)\b/i.test(searchStr)) {
+    resolution = "1080p";
+  } else if (/\b(720p)\b/i.test(searchStr)) {
+    resolution = "720p";
+  } else if (/\b(480p|576p|sd)\b/i.test(searchStr)) {
+    resolution = "480p";
+  } else if (/\b(cam|hdcam|telesync|tc)\b/i.test(searchStr)) {
+    resolution = "CAM";
+  }
+  let source = null;
+  if (/\b(remux|bdremux)\b/i.test(fileStr)) {
+    source = "REMUX";
+  } else if (/\b(bluray|blu[- ]ray|bdrip|brrip)\b/i.test(fileStr)) {
+    source = "BluRay";
+  } else if (/\b(web[- ]dl|webdl|amzn[- ]web|nf[- ]web|dsnp[- ]web|hmax[- ]web)\b/i.test(fileStr)) {
+    source = "WEB-DL";
+  } else if (/\b(webrip|web[- ]rip)\b/i.test(fileStr)) {
+    source = "WEBRip";
+  } else if (/\b(hdrip|hdtv)\b/i.test(fileStr)) {
+    source = "HDRip";
+  } else if (/\b(dvdrip|dvd[- ]rip|dvd)\b/i.test(fileStr)) {
+    source = "DVDRip";
+  } else if (/\b(cam|hdcam|telesync)\b/i.test(fileStr)) {
+    source = "CAM";
+  }
+  let videoCodec = null;
+  if (/\b(av1|av01)\b/i.test(fileStr)) {
+    videoCodec = "AV1";
+  } else if (/\b(x265|h265|h\.265|hevc)\b/i.test(fileStr)) {
+    videoCodec = "HEVC (x265)";
+  } else if (/\b(x264|h264|h\.264|avc)\b/i.test(fileStr)) {
+    videoCodec = "H.264 (x264)";
+  } else if (/\b(vp9)\b/i.test(fileStr)) {
+    videoCodec = "VP9";
+  } else if (/\b(xvid|divx)\b/i.test(fileStr)) {
+    videoCodec = "XviD";
+  }
+  let bitDepth = null;
+  if (/\b(10bit|10[- ]bit)\b/i.test(fileStr)) {
+    bitDepth = "10bit";
+  } else if (/\b(8bit|8[- ]bit)\b/i.test(fileStr)) {
+    bitDepth = "8bit";
+  }
+  const hdrParts = [];
+  if (/\b(dv|dovi|dolby[- ]vision)\b/i.test(fileStr)) {
+    hdrParts.push("DV");
+  }
+  if (/\b(hdr10\+|hdr10plus\b)/i.test(fileStr)) {
+    hdrParts.push("HDR10+");
+  } else if (/\b(hdr10\b)/i.test(fileStr)) {
+    hdrParts.push("HDR10");
+  } else if (/\b(hdr\b)/i.test(fileStr)) {
+    hdrParts.push("HDR");
+  }
+  if (/\b(hlg\b)/i.test(fileStr)) {
+    hdrParts.push("HLG");
+  }
+  const hdr = hdrParts.length > 0 ? hdrParts.join(" ") : null;
+  let bitDepthHdr = null;
+  const bdhArray = [];
+  if (bitDepth) bdhArray.push(bitDepth);
+  if (hdr) bdhArray.push(hdr);
+  if (bdhArray.length > 0) {
+    bitDepthHdr = bdhArray.join(" ");
+  }
+  let audioCodec = null;
+  const isAtmos = /\b(atmos)\b/i.test(fileStr);
+  if (/\b(truehd|true[- ]hd)\b/i.test(fileStr)) {
+    audioCodec = "TrueHD";
+  } else if (/\b(dts[- ]?hd[- .]?ma|dtshd)\b/i.test(fileStr)) {
+    audioCodec = "DTS-HD MA";
+  } else if (/\b(dts[- :x]x)\b/i.test(fileStr)) {
+    audioCodec = "DTS-X";
+  } else if (/\b(dts)\b/i.test(fileStr)) {
+    audioCodec = "DTS";
+  } else if (/\b(ddp\b|dd\+|ddplus\b|eac3\b|e[- ]ac[- ]?3\b)/i.test(fileStr)) {
+    audioCodec = "DDP";
+  } else if (/\b(dd\b|ac3\b|ac[- ]3\b|dolby[- ]digital)\b/i.test(fileStr)) {
+    audioCodec = "DD";
+  } else if (/\b(flac)\b/i.test(fileStr)) {
+    audioCodec = "FLAC";
+  } else if (/\b(opus)\b/i.test(fileStr)) {
+    audioCodec = "Opus";
+  } else if (/\b(aac)\b/i.test(fileStr)) {
+    audioCodec = "AAC";
+  } else if (/\b(mp3)\b/i.test(fileStr)) {
+    audioCodec = "MP3";
+  }
+  let channels = null;
+  if (/\b(7\.1|7ch|8ch)\b/i.test(fileStr)) {
+    channels = "7.1";
+  } else if (/\b(5\.1|6ch)\b/i.test(fileStr)) {
+    channels = "5.1";
+  } else if (/\b(2\.0|2ch|stereo)\b/i.test(fileStr)) {
+    channels = "2.0";
+  }
+  let audio = null;
+  if (audioCodec) {
+    const parts = [audioCodec];
+    if (channels) parts.push(channels);
+    if (isAtmos) parts.push("Atmos");
+    audio = parts.join(" ");
+  } else if (isAtmos) {
+    audio = channels ? `Dolby Atmos ${channels}` : "Dolby Atmos";
+  } else if (channels) {
+    audio = channels;
+  }
+  const isDual = /\b(dual[- ]audio|dual)\b/i.test(searchStr);
+  const isMulti = /\b(multi[- ]audio|multi)\b/i.test(searchStr);
+  const detectedLangs = [];
+  if (/\b(hindi|hin)\b/i.test(searchStr)) detectedLangs.push("Hindi");
+  if (/\b(english|eng)\b/i.test(searchStr)) detectedLangs.push("English");
+  if (/\b(bengali|bangla|ben|kolkata)\b/i.test(searchStr)) detectedLangs.push("Bengali");
+  if (/\b(tamil|tam)\b/i.test(searchStr)) detectedLangs.push("Tamil");
+  if (/\b(telugu|tel)\b/i.test(searchStr)) detectedLangs.push("Telugu");
+  if (/\b(malayalam|mal)\b/i.test(searchStr)) detectedLangs.push("Malayalam");
+  if (/\b(korean|kor)\b/i.test(searchStr)) detectedLangs.push("Korean");
+  if (/\b(japanese|jap|jpn)\b/i.test(searchStr)) detectedLangs.push("Japanese");
+  if (/\b(spanish|spa)\b/i.test(searchStr)) detectedLangs.push("Spanish");
+  if (/\b(french|fre)\b/i.test(searchStr)) detectedLangs.push("French");
+  let languages = null;
+  if (isDual) {
+    languages = detectedLangs.length > 0 ? `Dual Audio (${detectedLangs.join(", ")})` : "Dual Audio";
+  } else if (isMulti) {
+    languages = detectedLangs.length > 0 ? `Multi Audio (${detectedLangs.join(", ")})` : "Multi Audio";
+  } else if (detectedLangs.length > 0) {
+    languages = detectedLangs.join(", ");
+  }
+  const sizeBytes = parseSizeToBytes(sizeInput);
+  let formattedSize = null;
+  if (sizeBytes) {
+    formattedSize = formatBytes(sizeBytes);
+  } else if (typeof sizeInput === "string" && sizeInput.trim()) {
+    formattedSize = sizeInput.trim();
+  }
+  return {
+    resolution,
+    source,
+    videoCodec,
+    bitDepth,
+    hdr,
+    bitDepthHdr,
+    audio,
+    audioCodec,
+    channels,
+    isAtmos,
+    languages,
+    filename: cleanFileName(rawFileName),
+    sizeBytes,
+    formattedSize
+  };
+}
+function formatStreamTitle(meta, serverName = null) {
+  const videoParts = [];
+  let resSource = meta.resolution || "HD";
+  if (meta.source) {
+    resSource += ` ${meta.source}`;
+  }
+  videoParts.push(resSource);
+  let codecStr = meta.videoCodec || "";
+  if (meta.bitDepthHdr) {
+    codecStr = codecStr ? `${codecStr} ${meta.bitDepthHdr}` : meta.bitDepthHdr;
+  }
+  if (codecStr) {
+    videoParts.push(codecStr);
+  }
+  const prefix = serverName ? `[${serverName}] ` : "";
+  const line1 = prefix + videoParts.join(" \u2022 ");
+  const line2Parts = [];
+  if (meta.audio) {
+    line2Parts.push(`\u{1F50A} ${meta.audio}`);
+  }
+  if (meta.languages) {
+    line2Parts.push(meta.languages);
+  }
+  if (meta.formattedSize) {
+    line2Parts.push(`\u{1F4BE} ${meta.formattedSize}`);
+  }
+  const line2 = line2Parts.join(" \u2022 ");
+  const line3 = meta.filename || "";
+  const lines = [line1];
+  if (line2) lines.push(line2);
+  if (line3) lines.push(line3);
+  return lines.join("\n");
+}
+function sortStreams(streams) {
+  if (!Array.isArray(streams) || streams.length <= 1) return streams || [];
+  const resRank = {
+    "4K": 40,
+    "1080p": 30,
+    "720p": 20,
+    "HD": 15,
+    "480p": 10,
+    "CAM": 1
+  };
+  const sourceRank = {
+    "REMUX": 6,
+    "BluRay": 5,
+    "WEB-DL": 4,
+    "WEBRip": 3,
+    "HDRip": 2,
+    "DVDRip": 1
+  };
+  return streams.slice().sort((a, b) => {
+    const aRes = resRank[a.quality] || 0;
+    const bRes = resRank[b.quality] || 0;
+    if (bRes !== aRes) return bRes - aRes;
+    const aMeta = a._meta;
+    const bMeta = b._meta;
+    const aSource = aMeta && sourceRank[aMeta.source] || 0;
+    const bSource = bMeta && sourceRank[bMeta.source] || 0;
+    if (bSource !== aSource) return bSource - aSource;
+    const aSize = a.behaviorHints && a.behaviorHints.videoSize || 0;
+    const bSize = b.behaviorHints && b.behaviorHints.videoSize || 0;
+    if (bSize !== aSize) return bSize - aSize;
+    return 0;
   });
 }
 
@@ -414,25 +645,37 @@ function lookupStaticIndex(tmdbId, mediaType = "movie", season = null, episode =
         const size = entry[3] || null;
         const host = hosts[hostIndex] || DEFAULT_HOSTS[hostIndex] || "http://172.16.50.14";
         const serverName = SERVER_NAMES[host] || `DhakaFlix`;
-        const fileName = nameFromUrl(relativePath);
-        const cleaned = cleanFileName(fileName);
         const directUrl = normalizeStreamUrl(host, relativePath);
-        const sizeStr = size ? ` (${size})` : "";
-        streams.push({
+        const meta2 = parseMediaMetadata(relativePath, size);
+        if (quality && meta2.resolution === "HD" && quality !== "HD") {
+          meta2.resolution = quality;
+        }
+        const streamObj = {
           name: "DhakaFlix \u26A1",
-          title: `[${serverName}] ${cleaned} [${quality}]${sizeStr}`,
+          title: formatStreamTitle(meta2, serverName),
           url: directUrl,
-          quality,
+          quality: meta2.resolution,
           headers: {
             "User-Agent": USER_AGENT,
             "Referer": `${host}/`
-          }
-        });
+          },
+          behaviorHints: {
+            filename: meta2.filename
+          },
+          _meta: meta2
+        };
+        if (meta2.formattedSize) {
+          streamObj.size = meta2.formattedSize;
+        }
+        if (meta2.sizeBytes) {
+          streamObj.behaviorHints.videoSize = meta2.sizeBytes;
+        }
+        streams.push(streamObj);
       }
       if (DEBUG) {
         console.log(`[DhakaFlix Index] \u26A1 HIT! Discovered ${streams.length} stream(s) for ${type} ${tmdbId} in ~150ms.`);
       }
-      return streams;
+      return sortStreams(streams);
     } catch (err) {
       if (DEBUG) console.log(`[DhakaFlix Index] Lookup error: ${err.message}`);
       return [];
@@ -708,9 +951,15 @@ function parseDirectoryHtml(html, baseHref) {
         href: resolvedHref
       });
     } else if (isVideoFile(resolvedHref)) {
+      const sizeMatch = trContent.match(/<td[^>]*class=["'][^"']*fb-s[^"']*["'][^>]*>([\s\S]*?)<\/td>/i);
+      const rawSize = sizeMatch ? sizeMatch[1].replace(/<[^>]+>/g, "").trim() : null;
+      const sizeBytes = parseSizeToBytes(rawSize);
+      const formattedSize = sizeBytes ? formatBytes(sizeBytes) : rawSize || null;
       files.push({
         name: rawText || nameFromUrl(resolvedHref),
-        href: resolvedHref
+        href: resolvedHref,
+        size: formattedSize,
+        sizeBytes
       });
     }
   }
@@ -999,7 +1248,7 @@ function getStreams(tmdbId, mediaType = "movie", season = null, episode = null) 
         collectStreams(fallbackResults, allStreams, seenUrls);
       }
       if (DEBUG) console.log(`[DhakaFlix] Discovered ${allStreams.length} stream(s)`);
-      return allStreams;
+      return sortStreams(allStreams);
     } catch (error) {
       console.error(`[DhakaFlix] Unexpected error in getStreams: ${error.message}`);
       return [];
@@ -1066,7 +1315,7 @@ function processMovieItems(server, items, meta, streams) {
       const rawName = nameFromUrl(item.href);
       if (isVideoFile(item.href)) {
         if (isTitleMatch(rawName, meta.title, meta.year, "movie")) {
-          addStreamResult(server, streams, rawName, item.href);
+          addStreamResult(server, streams, rawName, item.href, item.size);
         }
         continue;
       }
@@ -1087,7 +1336,7 @@ function processMovieItems(server, items, meta, streams) {
         if (res.status === "fulfilled" && res.value && Array.isArray(res.value.files)) {
           for (const file of res.value.files) {
             if (isVideoFile(file.href)) {
-              addStreamResult(server, streams, file.name, file.href);
+              addStreamResult(server, streams, file.name, file.href, file.size);
             }
           }
         }
@@ -1101,7 +1350,7 @@ function processTvItems(server, items, meta, targetSeason, targetEpisode, stream
       if (isVideoFile(item.href)) {
         const rawName = nameFromUrl(item.href);
         if (matchesEpisodeFile(rawName, targetSeason, targetEpisode, false) && isTitleMatch(rawName, meta.title, null, "tv")) {
-          addStreamResult(server, streams, rawName, item.href);
+          addStreamResult(server, streams, rawName, item.href, item.size);
         }
       }
     }
@@ -1210,7 +1459,7 @@ function processTvItems(server, items, meta, targetSeason, targetEpisode, stream
 function matchAndAddEpisode(server, streams, files, targetSeason, targetEpisode, isInSeasonFolder) {
   for (const file of files) {
     if (matchesEpisodeFile(file.name, targetSeason, targetEpisode, isInSeasonFolder)) {
-      addStreamResult(server, streams, file.name, file.href);
+      addStreamResult(server, streams, file.name, file.href, file.size);
     }
   }
   if (streams.length === 0 && isInSeasonFolder && files.length >= targetEpisode) {
@@ -1219,25 +1468,33 @@ function matchAndAddEpisode(server, streams, files, targetSeason, targetEpisode,
     );
     const file = sortedFiles[targetEpisode - 1];
     if (file) {
-      addStreamResult(server, streams, file.name, file.href);
+      addStreamResult(server, streams, file.name, file.href, file.size);
     }
   }
 }
-function addStreamResult(server, streams, fileName, fileHref) {
-  const quality = parseQuality(fileName);
-  const mediaTags = extractMediaTags(fileName);
-  const tagInfo = mediaTags.length > 0 ? ` [${mediaTags.join(" | ")}]` : "";
-  const cleaned = cleanFileName(fileName);
+function addStreamResult(server, streams, fileName, fileHref, sizeInput = null) {
+  const meta = parseMediaMetadata(fileHref, sizeInput);
   const directUrl = normalizeStreamUrl(server.mainUrl, fileHref);
-  streams.push({
+  const streamObj = {
     name: "DhakaFlix",
-    title: `[${server.name}] ${cleaned} [${quality}]${tagInfo}`,
+    title: formatStreamTitle(meta, server.name),
     url: directUrl,
-    quality,
+    quality: meta.resolution,
     headers: {
       "User-Agent": USER_AGENT,
       "Referer": `${server.mainUrl}/`
-    }
-  });
+    },
+    behaviorHints: {
+      filename: meta.filename
+    },
+    _meta: meta
+  };
+  if (meta.formattedSize) {
+    streamObj.size = meta.formattedSize;
+  }
+  if (meta.sizeBytes) {
+    streamObj.behaviorHints.videoSize = meta.sizeBytes;
+  }
+  streams.push(streamObj);
 }
 module.exports = { getStreams };

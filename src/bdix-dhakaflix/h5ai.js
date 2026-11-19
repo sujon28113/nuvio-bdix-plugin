@@ -14,6 +14,7 @@ import {
   normalizeStreamUrl,
   fetchWithTimeout
 } from "./utils.js";
+import { parseSizeToBytes, formatBytes } from "./parser.js";
 import { USER_AGENT, REQUEST_TIMEOUT_MS, DEBUG } from "./constants.js";
 import { memoryCache } from "./cache.js";
 import { isHostDead, markHostDead, markHostAlive } from "./circuitBreaker.js";
@@ -243,9 +244,17 @@ export function parseDirectoryHtml(html, baseHref) {
         href: resolvedHref
       });
     } else if (isVideoFile(resolvedHref)) {
+      // Extract size from table cell (<td class="fb-s">2818704 KB</td>)
+      const sizeMatch = trContent.match(/<td[^>]*class=["'][^"']*fb-s[^"']*["'][^>]*>([\s\S]*?)<\/td>/i);
+      const rawSize = sizeMatch ? sizeMatch[1].replace(/<[^>]+>/g, "").trim() : null;
+      const sizeBytes = parseSizeToBytes(rawSize);
+      const formattedSize = sizeBytes ? formatBytes(sizeBytes) : (rawSize || null);
+
       files.push({
         name: rawText || nameFromUrl(resolvedHref),
-        href: resolvedHref
+        href: resolvedHref,
+        size: formattedSize,
+        sizeBytes: sizeBytes
       });
     }
   }

@@ -62,12 +62,47 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function safeEncodeUriSegment(segment) {
+  if (!segment) return "";
+  let decoded = segment;
+  try {
+    decoded = decodeURIComponent(segment);
+  } catch (e) {}
+  return encodeURIComponent(decoded).replace(
+    /[!'()*]/g,
+    (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase()
+  );
+}
+
+function normalizeStreamUrl(baseUrl, rawPath) {
+  if (!rawPath) return "";
+  let fullUrl =
+    rawPath.startsWith("http://") || rawPath.startsWith("https://")
+      ? rawPath
+      : `${baseUrl.replace(/\/+$/, "")}/${rawPath.replace(/^\/+/, "")}`;
+  const sanitizedUrl = fullUrl.replace(/#/g, "%23");
+  const match = sanitizedUrl.match(/^(https?:\/\/[^\/]+)(\/[^?]*)?(\?.*)?$/);
+  if (!match) return sanitizedUrl;
+  const origin = match[1];
+  const pathname = match[2] || "/";
+  const search = match[3] || "";
+  const encodedPath = pathname.split("/").map(safeEncodeUriSegment).join("/");
+  return `${origin}${encodedPath}${search}`;
+}
+
 function formatBytes(bytes) {
-  if (!bytes || isNaN(bytes)) return null;
+  if (typeof bytes !== "number" || isNaN(bytes) || bytes <= 0) return null;
   const gb = bytes / (1024 * 1024 * 1024);
-  if (gb >= 1) return `${gb.toFixed(1)} GB`;
+  if (gb >= 1) {
+    const formatted = gb >= 10 ? gb.toFixed(1) : gb.toFixed(2);
+    return `${parseFloat(formatted)} GB`;
+  }
   const mb = bytes / (1024 * 1024);
-  return `${Math.round(mb)} MB`;
+  if (mb >= 1) {
+    return `${Math.round(mb)} MB`;
+  }
+  const kb = bytes / 1024;
+  return `${Math.round(kb)} KB`;
 }
 
 function parseQuality(name) {
@@ -466,13 +501,15 @@ async function runIndexer() {
   fs.mkdirSync(TV_INDEX_DIR, { recursive: true });
 
   // Load persistent cache
-  let cacheData = { tmdbMatches: {}, processedFolders: {} };
+  let cacheData = { tmdbMatches: {}, processedFolders: {}, fileSizes: {} };
   if (RESUME && fs.existsSync(CACHE_FILE)) {
     try {
       cacheData = JSON.parse(fs.readFileSync(CACHE_FILE, "utf-8"));
-      console.log(`📦 Loaded checkpoint cache: ${Object.keys(cacheData.tmdbMatches || {}).length} TMDB items, ${Object.keys(cacheData.processedFolders || {}).length} processed folders.`);
+      cacheData.fileSizes = cacheData.fileSizes || {};
+      console.log(`📦 Loaded checkpoint cache: ${Object.keys(cacheData.tmdbMatches || {}).length} TMDB items, ${Object.keys(cacheData.fileSizes || {}).length} cached file sizes.`);
     } catch (e) {
       console.warn("⚠️ Failed to parse cache file, starting fresh.");
+      cacheData = { tmdbMatches: {}, processedFolders: {}, fileSizes: {} };
     }
   }
 
@@ -490,6 +527,45 @@ async function runIndexer() {
     } catch (e) {
       console.warn("Failed to write checkpoint:", e.message);
     }
+  }
+
+  /**
+   * Indexer-only HEAD fallback: fetches Content-Length if directory listing omits size
+   */
+  async function getOrFetchFileSize(hostIndex, fileHref) {
+    if (!fileHref) return null;
+    if (cacheData.fileSizes[fileHref] !== undefined) {
+      return cacheData.fileSizes[fileHref];
+    }
+
+    const host = HOSTS[hostIndex];
+    if (!host) return null;
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 3000);
+      const url = normalizeStreamUrl(host, fileHref);
+      const res = await fetch(url, {
+        method: "HEAD",
+        signal: controller.signal,
+        headers: { "User-Agent": USER_AGENT }
+      });
+      clearTimeout(timer);
+
+      const cl = res.headers.get("Content-Length");
+      if (cl) {
+        const bytes = parseInt(cl, 10);
+        if (!isNaN(bytes) && bytes > 0) {
+          cacheData.fileSizes[fileHref] = bytes;
+          return bytes;
+        }
+      }
+    } catch (err) {
+      // ignore network errors for HEAD
+    }
+
+    cacheData.fileSizes[fileHref] = null;
+    return null;
   }
 
   let totalItemsProcessed = 0;
@@ -598,7 +674,12 @@ async function runIndexer() {
 
     const tmdbId = String(match.id);
     const quality = parseQuality(fileHref);
-    const humanSize = formatBytes(size);
+
+    let sizeBytes = size;
+    if (sizeBytes == null) {
+      sizeBytes = await getOrFetchFileSize(hostIndex, fileHref);
+    }
+    const humanSize = formatBytes(sizeBytes);
 
     if (!catalogMovies.has(tmdbId)) {
       catalogMovies.set(tmdbId, []);
@@ -684,6 +765,12 @@ async function runIndexer() {
           const e = (se && se.episode) || i + 1;
           const key = `${s}-${e}`;
 
+          let sizeBytes = file.size;
+          if (sizeBytes == null) {
+            sizeBytes = await getOrFetchFileSize(hostIndex, file.href);
+          }
+          const humanSize = formatBytes(sizeBytes);
+
           if (!showMap.has(key)) showMap.set(key, []);
           const existing = showMap.get(key);
           if (!existing.some((item) => item[1] === file.href)) {
@@ -691,7 +778,7 @@ async function runIndexer() {
               hostIndex,
               file.href,
               parseQuality(file.name),
-              formatBytes(file.size)
+              humanSize
             ]);
           }
         }
@@ -707,6 +794,12 @@ async function runIndexer() {
         const e = (se && se.episode) || i + 1;
         const key = `${s}-${e}`;
 
+        let sizeBytes = file.size;
+        if (sizeBytes == null) {
+          sizeBytes = await getOrFetchFileSize(hostIndex, file.href);
+        }
+        const humanSize = formatBytes(sizeBytes);
+
         if (!showMap.has(key)) showMap.set(key, []);
         const existing = showMap.get(key);
         if (!existing.some((item) => item[1] === file.href)) {
@@ -714,7 +807,7 @@ async function runIndexer() {
             hostIndex,
             file.href,
             parseQuality(file.name),
-            formatBytes(file.size)
+            humanSize
           ]);
         }
       }
