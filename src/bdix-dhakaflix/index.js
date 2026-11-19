@@ -20,6 +20,7 @@ const TMDB_API_KEY = "e80ea2a38c45dc7aaccf08b1babcd3a7";
 const FALLBACK_TMDB_KEY = "e6333b32409e02a4a6eba6fb7ff866bb";
 
 import { USER_AGENT, DEBUG } from "./constants.js";
+import { lookupStaticIndex } from "./indexClient.js";
 import { getTmdbMetadata } from "./tmdb.js";
 import { routeServers } from "./routing.js";
 import {
@@ -59,19 +60,6 @@ async function getStreams(tmdbId, mediaType = "movie", season = null, episode = 
       );
     }
 
-    // 1. Validate TMDB API Key
-    let apiKey = TMDB_API_KEY;
-    if (!apiKey || apiKey === "YOUR_TMDB_API_KEY_HERE") {
-      if (FALLBACK_TMDB_KEY) {
-        apiKey = FALLBACK_TMDB_KEY;
-      } else {
-        console.error(
-          "[DhakaFlix] ERROR: TMDB_API_KEY is not configured! Please set a valid TMDB v3 API key."
-        );
-        return [];
-      }
-    }
-
     if (!tmdbId) {
       console.error("[DhakaFlix] Error: Missing tmdbId parameter");
       return [];
@@ -93,7 +81,51 @@ async function getStreams(tmdbId, mediaType = "movie", season = null, episode = 
       }
     }
 
-    // 3. Resolve TMDB ID to Title, Year, Language, and Genres (cached)
+    // =========================================================================
+    // FAST PATH: Pre-indexed Static Catalog Lookup (Sub-second ~150-300ms)
+    // =========================================================================
+    try {
+      const staticStreams = await lookupStaticIndex(
+        tmdbId,
+        type,
+        targetSeason,
+        targetEpisode
+      );
+      if (staticStreams && staticStreams.length > 0) {
+        if (DEBUG) {
+          console.log(
+            `[DhakaFlix] ⚡ Fast-path hit! Returning ${staticStreams.length} stream(s) instantly`
+          );
+        }
+        return staticStreams;
+      }
+    } catch (indexErr) {
+      if (DEBUG) {
+        console.log(`[DhakaFlix] Static index fast-path error: ${indexErr.message}`);
+      }
+    }
+
+    // =========================================================================
+    // FALLBACK: Live BDIX Scraper
+    // =========================================================================
+    if (DEBUG) {
+      console.log(`[DhakaFlix] Fallback: Executing live BDIX scraper for ${type} ${tmdbId}...`);
+    }
+
+    // 3. Validate TMDB API Key for live search
+    let apiKey = TMDB_API_KEY;
+    if (!apiKey || apiKey === "YOUR_TMDB_API_KEY_HERE") {
+      if (FALLBACK_TMDB_KEY) {
+        apiKey = FALLBACK_TMDB_KEY;
+      } else {
+        console.error(
+          "[DhakaFlix] ERROR: TMDB_API_KEY is not configured! Please set a valid TMDB v3 API key."
+        );
+        return [];
+      }
+    }
+
+    // 4. Resolve TMDB ID to Title, Year, Language, and Genres (cached)
     const meta = await getTmdbMetadata(tmdbId, type, apiKey);
     if (!meta || !meta.title) {
       console.error(`[DhakaFlix] Failed to resolve TMDB metadata for ${type} ${tmdbId}`);

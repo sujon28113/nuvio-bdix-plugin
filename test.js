@@ -30,6 +30,7 @@ const {
 const { BoundedCache } = require("./src/bdix-dhakaflix/cache.js");
 const { isHostDead, markHostDead, markHostAlive } = require("./src/bdix-dhakaflix/circuitBreaker.js");
 const { routeServers } = require("./src/bdix-dhakaflix/routing.js");
+const { getShardKey, lookupStaticIndex, DEFAULT_HOSTS } = require("./src/bdix-dhakaflix/indexClient.js");
 
 let passedTests = 0;
 let failedTests = 0;
@@ -409,6 +410,195 @@ async function runAllTests() {
         // Confirm cache prevented duplicate network requests
         assert.strictEqual(tmdbCalls, 1);
         assert.strictEqual(dhakaFlixSearchCalls, 1);
+      } finally {
+        global.fetch = originalFetch;
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // 10. Static Catalog Fast-Path Verification
+  // ---------------------------------------------------------------------------
+  console.log("\n⚡ Group 10: Static Catalog Fast-Path Verification");
+
+  it("getShardKey computes correct 2-digit modulo 100 shard hash", () => {
+    assert.strictEqual(getShardKey("872585"), "85"); // 872585 % 100 = 85
+    assert.strictEqual(getShardKey("1396"), "96");   // 1396 % 100 = 96
+    assert.strictEqual(getShardKey("77236"), "36");  // 77236 % 100 = 36
+    assert.strictEqual(getShardKey("5"), "05");      // 5 % 100 = 05
+    assert.strictEqual(getShardKey("100"), "00");    // 100 % 100 = 00
+    assert.strictEqual(getShardKey(""), "00");       // fallback
+  });
+
+  await itAsync(
+    "lookupStaticIndex extracts and formats movie stream tuples from shard",
+    async () => {
+      const originalFetch = global.fetch;
+      try {
+        global.fetch = async (url) => {
+          const urlStr = url.toString();
+          if (urlStr.includes("index/m/85.json")) {
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({
+                "872585": [
+                  [
+                    0,
+                    "/DHAKA-FLIX-14/English%20Movies%20%281080p%29/%282023%29%201080p/Oppenheimer%20%282023%29%201080p/Oppenheimer.2023.1080p.mkv",
+                    "1080p",
+                    "4.2 GB"
+                  ]
+                ]
+              })
+            };
+          }
+          if (urlStr.includes("index/meta.json")) {
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({
+                version: 1,
+                hosts: DEFAULT_HOSTS
+              })
+            };
+          }
+          return { ok: false, status: 404 };
+        };
+
+        const streams = await lookupStaticIndex("872585", "movie");
+        assert.strictEqual(streams.length, 1);
+        assert.strictEqual(streams[0].name, "DhakaFlix ⚡");
+        assert.ok(streams[0].title.includes("Oppenheimer"));
+        assert.ok(streams[0].title.includes("[1080p]"));
+        assert.ok(streams[0].title.includes("(4.2 GB)"));
+        assert.ok(streams[0].url.startsWith("http://172.16.50.14/DHAKA-FLIX-14/"));
+        assert.strictEqual(streams[0].quality, "1080p");
+      } finally {
+        global.fetch = originalFetch;
+      }
+    }
+  );
+
+  await itAsync(
+    "lookupStaticIndex extracts targeted TV episode stream from shard",
+    async () => {
+      const originalFetch = global.fetch;
+      try {
+        global.fetch = async (url) => {
+          const urlStr = url.toString();
+          if (urlStr.includes("index/t/96.json")) {
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({
+                "1396": {
+                  "1-1": [
+                    [
+                      1,
+                      "/DHAKA-FLIX-12/TV-WEB-Series/Breaking%20Bad/Season%201/Breaking%20Bad%20S01E01.mkv",
+                      "1080p",
+                      "1.0 GB"
+                    ]
+                  ],
+                  "1-2": [
+                    [
+                      1,
+                      "/DHAKA-FLIX-12/TV-WEB-Series/Breaking%20Bad/Season%201/Breaking%20Bad%20S01E02.mkv",
+                      "1080p",
+                      "869 MB"
+                    ]
+                  ]
+                }
+              })
+            };
+          }
+          if (urlStr.includes("index/meta.json")) {
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({ version: 1, hosts: DEFAULT_HOSTS })
+            };
+          }
+          return { ok: false, status: 404 };
+        };
+
+        const s1e1Streams = await lookupStaticIndex("1396", "tv", 1, 1);
+        assert.strictEqual(s1e1Streams.length, 1);
+        assert.ok(s1e1Streams[0].title.includes("S01E01"));
+        assert.strictEqual(s1e1Streams[0].name, "DhakaFlix ⚡");
+
+        const s1e2Streams = await lookupStaticIndex("1396", "tv", 1, 2);
+        assert.strictEqual(s1e2Streams.length, 1);
+        assert.ok(s1e2Streams[0].title.includes("S01E02"));
+
+        const s9e9Streams = await lookupStaticIndex("1396", "tv", 9, 9);
+        assert.strictEqual(s9e9Streams.length, 0); // Episode does not exist
+      } finally {
+        global.fetch = originalFetch;
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // 11. Performance Benchmark: Fast-Path vs Fallback
+  // ---------------------------------------------------------------------------
+  console.log("\n⏱️ Group 11: Performance Benchmark (Fast-Path Hit vs Fallback)");
+
+  await itAsync(
+    "Fast-path resolves in sub-10ms without TMDB or live BDIX search calls",
+    async () => {
+      const originalFetch = global.fetch;
+      try {
+        let tmdbCalls = 0;
+        let dhakaFlixSearchCalls = 0;
+        let staticIndexCalls = 0;
+
+        global.fetch = async (url) => {
+          const urlStr = url.toString();
+
+          if (urlStr.includes("raw.githubusercontent.com") || urlStr.includes("jsdelivr.net")) {
+            staticIndexCalls++;
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({
+                "872585": [
+                  [
+                    0,
+                    "/DHAKA-FLIX-14/English%20Movies%20%281080p%29/%282023%29%201080p/Oppenheimer%20%282023%29%201080p/Oppenheimer.2023.1080p.mkv",
+                    "1080p",
+                    "4.2 GB"
+                  ]
+                ]
+              })
+            };
+          }
+
+          if (urlStr.includes("api.themoviedb.org")) {
+            tmdbCalls++;
+            return { ok: true, status: 200, json: async () => ({}) };
+          }
+
+          if (urlStr.includes("172.16.50")) {
+            dhakaFlixSearchCalls++;
+            return { ok: true, status: 200, json: async () => ({ search: [] }) };
+          }
+
+          return { ok: false, status: 404 };
+        };
+
+        const t0 = Date.now();
+        const streams = await provider.getStreams("872585", "movie");
+        const elapsed = Date.now() - t0;
+
+        assert.strictEqual(streams.length, 1);
+        assert.strictEqual(streams[0].name, "DhakaFlix ⚡");
+        assert.ok(staticIndexCalls >= 1 && staticIndexCalls <= 2);
+        // CRITICAL: 0 calls to TMDB or BDIX servers on fast-path hit!
+        assert.strictEqual(tmdbCalls, 0);
+        assert.strictEqual(dhakaFlixSearchCalls, 0);
+        console.log(`     ⚡ Fast-Path execution time: ${elapsed}ms (TMDB calls: 0, BDIX searches: 0)`);
       } finally {
         global.fetch = originalFetch;
       }

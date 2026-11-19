@@ -1,6 +1,6 @@
 /**
  * bdix-dhakaflix - Built for Nuvio
- * Generated: 2026-11-19T11:40:24.722Z
+ * Generated: 2026-11-19T12:07:46.470Z
  */
 var __async = (__this, __arguments, generator) => {
   return new Promise((resolve, reject) => {
@@ -269,6 +269,176 @@ var BoundedCache = class {
   }
 };
 var memoryCache = new BoundedCache(50, 20 * 60 * 1e3);
+
+// src/bdix-dhakaflix/indexClient.js
+var GITHUB_OWNER = "sujon28113";
+var GITHUB_REPO = "nuvio-bdix-plugin";
+var GITHUB_BRANCH = "main";
+var PRIMARY_INDEX_BASE = `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/index`;
+var CDN_INDEX_BASE = `https://cdn.jsdelivr.net/gh/${GITHUB_OWNER}/${GITHUB_REPO}@${GITHUB_BRANCH}/index`;
+var DEFAULT_HOSTS = [
+  "http://172.16.50.14",
+  // 0: Server 14
+  "http://172.16.50.12",
+  // 1: Server 12
+  "http://172.16.50.7",
+  // 2: Server 7
+  "http://172.16.50.9"
+  // 3: Server 9
+];
+var SERVER_NAMES = {
+  "http://172.16.50.14": "DhakaFlix 14",
+  "http://172.16.50.12": "DhakaFlix 12",
+  "http://172.16.50.7": "DhakaFlix 7",
+  "http://172.16.50.9": "DhakaFlix 9"
+};
+var shardCache = new BoundedCache(15, 30 * 60 * 1e3);
+var cachedMeta = null;
+var metaExpiry = 0;
+function getShardKey(tmdbId) {
+  const num = parseInt(tmdbId, 10);
+  if (isNaN(num)) return "00";
+  return String(Math.abs(num) % 100).padStart(2, "0");
+}
+function fetchIndexJson(url, timeoutMs = 3500) {
+  return __async(this, null, function* () {
+    let controller = null;
+    let timer = null;
+    if (typeof AbortController !== "undefined") {
+      controller = new AbortController();
+    }
+    const fetchPromise = fetch(url, {
+      method: "GET",
+      signal: controller ? controller.signal : void 0,
+      headers: {
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT
+      }
+    });
+    const timeoutPromise = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        if (controller) {
+          try {
+            controller.abort();
+          } catch (e) {
+          }
+        }
+        reject(new Error(`Fetch timed out for ${url}`));
+      }, timeoutMs);
+    });
+    try {
+      const res = yield Promise.race([fetchPromise, timeoutPromise]);
+      clearTimeout(timer);
+      if (!res.ok) return null;
+      return yield res.json();
+    } catch (err) {
+      clearTimeout(timer);
+      return null;
+    }
+  });
+}
+function getIndexMeta() {
+  return __async(this, null, function* () {
+    const now = Date.now();
+    if (cachedMeta && now < metaExpiry) {
+      return cachedMeta;
+    }
+    let meta = yield fetchIndexJson(`${PRIMARY_INDEX_BASE}/meta.json`, 3e3);
+    if (!meta) {
+      meta = yield fetchIndexJson(`${CDN_INDEX_BASE}/meta.json`, 3500);
+    }
+    if (meta && Array.isArray(meta.hosts)) {
+      cachedMeta = meta;
+      metaExpiry = now + 30 * 60 * 1e3;
+      return meta;
+    }
+    return {
+      version: 1,
+      hosts: DEFAULT_HOSTS
+    };
+  });
+}
+function fetchShard(subDir, shardKey) {
+  return __async(this, null, function* () {
+    const cacheKey = `shard_${subDir}_${shardKey}`;
+    const cached = shardCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+    const shardPath = `${subDir}/${shardKey}.json`;
+    let data = yield fetchIndexJson(`${PRIMARY_INDEX_BASE}/${shardPath}`, 3500);
+    if (!data) {
+      data = yield fetchIndexJson(`${CDN_INDEX_BASE}/${shardPath}`, 3500);
+    }
+    if (data && typeof data === "object") {
+      shardCache.set(cacheKey, data);
+      return data;
+    }
+    return null;
+  });
+}
+function lookupStaticIndex(tmdbId, mediaType = "movie", season = null, episode = null) {
+  return __async(this, null, function* () {
+    if (!tmdbId) return [];
+    const type = mediaType === "tv" || mediaType === "series" ? "tv" : "movie";
+    const shardKey = getShardKey(tmdbId);
+    const subDir = type === "movie" ? "m" : "t";
+    try {
+      const shard = yield fetchShard(subDir, shardKey);
+      if (!shard) {
+        if (DEBUG) console.log(`[DhakaFlix Index] Shard ${subDir}/${shardKey}.json not found or unreachable.`);
+        return [];
+      }
+      const idStr = String(tmdbId);
+      let entries = null;
+      if (type === "movie") {
+        entries = shard[idStr];
+      } else {
+        const showData = shard[idStr];
+        if (showData && season != null && episode != null) {
+          const epKey = `${season}-${episode}`;
+          entries = showData[epKey];
+        }
+      }
+      if (!entries || !Array.isArray(entries) || entries.length === 0) {
+        if (DEBUG) console.log(`[DhakaFlix Index] Miss: ${type} ${tmdbId} not found in shard ${shardKey}.`);
+        return [];
+      }
+      const meta = yield getIndexMeta();
+      const hosts = meta && meta.hosts || DEFAULT_HOSTS;
+      const streams = [];
+      for (const entry of entries) {
+        const hostIndex = entry[0];
+        const relativePath = entry[1];
+        const quality = entry[2] || "HD";
+        const size = entry[3] || null;
+        const host = hosts[hostIndex] || DEFAULT_HOSTS[hostIndex] || "http://172.16.50.14";
+        const serverName = SERVER_NAMES[host] || `DhakaFlix`;
+        const fileName = nameFromUrl(relativePath);
+        const cleaned = cleanFileName(fileName);
+        const directUrl = normalizeStreamUrl(host, relativePath);
+        const sizeStr = size ? ` (${size})` : "";
+        streams.push({
+          name: "DhakaFlix \u26A1",
+          title: `[${serverName}] ${cleaned} [${quality}]${sizeStr}`,
+          url: directUrl,
+          quality,
+          headers: {
+            "User-Agent": USER_AGENT,
+            "Referer": `${host}/`
+          }
+        });
+      }
+      if (DEBUG) {
+        console.log(`[DhakaFlix Index] \u26A1 HIT! Discovered ${streams.length} stream(s) for ${type} ${tmdbId} in ~150ms.`);
+      }
+      return streams;
+    } catch (err) {
+      if (DEBUG) console.log(`[DhakaFlix Index] Lookup error: ${err.message}`);
+      return [];
+    }
+  });
+}
 
 // src/bdix-dhakaflix/tmdb.js
 function getTmdbMetadata(tmdbId, mediaType, apiKey) {
@@ -751,17 +921,6 @@ function getStreams(tmdbId, mediaType = "movie", season = null, episode = null) 
           `[DhakaFlix] Request: ${mediaType} TMDB:${tmdbId}${mediaType === "tv" ? ` S:${season} E:${episode}` : ""}`
         );
       }
-      let apiKey = TMDB_API_KEY;
-      if (!apiKey || apiKey === "YOUR_TMDB_API_KEY_HERE") {
-        if (FALLBACK_TMDB_KEY) {
-          apiKey = FALLBACK_TMDB_KEY;
-        } else {
-          console.error(
-            "[DhakaFlix] ERROR: TMDB_API_KEY is not configured! Please set a valid TMDB v3 API key."
-          );
-          return [];
-        }
-      }
       if (!tmdbId) {
         console.error("[DhakaFlix] Error: Missing tmdbId parameter");
         return [];
@@ -775,6 +934,40 @@ function getStreams(tmdbId, mediaType = "movie", season = null, episode = null) 
         if (isNaN(targetSeason) || isNaN(targetEpisode)) {
           console.error(
             `[DhakaFlix] Invalid or missing season/episode for TV show (season=${season}, episode=${episode})`
+          );
+          return [];
+        }
+      }
+      try {
+        const staticStreams = yield lookupStaticIndex(
+          tmdbId,
+          type,
+          targetSeason,
+          targetEpisode
+        );
+        if (staticStreams && staticStreams.length > 0) {
+          if (DEBUG) {
+            console.log(
+              `[DhakaFlix] \u26A1 Fast-path hit! Returning ${staticStreams.length} stream(s) instantly`
+            );
+          }
+          return staticStreams;
+        }
+      } catch (indexErr) {
+        if (DEBUG) {
+          console.log(`[DhakaFlix] Static index fast-path error: ${indexErr.message}`);
+        }
+      }
+      if (DEBUG) {
+        console.log(`[DhakaFlix] Fallback: Executing live BDIX scraper for ${type} ${tmdbId}...`);
+      }
+      let apiKey = TMDB_API_KEY;
+      if (!apiKey || apiKey === "YOUR_TMDB_API_KEY_HERE") {
+        if (FALLBACK_TMDB_KEY) {
+          apiKey = FALLBACK_TMDB_KEY;
+        } else {
+          console.error(
+            "[DhakaFlix] ERROR: TMDB_API_KEY is not configured! Please set a valid TMDB v3 API key."
           );
           return [];
         }

@@ -9,6 +9,9 @@ package-lock.json
 # Temporary inspection directory
 temp_inspect/
 
+# Local indexer cache & checkpoints
+.cache/
+
 # System / logs
 .system_generated/
 *.log

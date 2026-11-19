@@ -6,7 +6,10 @@
   "scripts": {
     "build": "node build.js",
     "build:min": "node build.js --minify",
-    "test": "node test.js"
+    "test": "node test.js",
+    "index:sample": "node scripts/index-catalog.js --sample",
+    "index": "node scripts/index-catalog.js --resume",
+    "sync": "node scripts/index-catalog.js --resume && npm run build && git add index/ providers/ && git commit -m \"Update static catalog index\" && git push"
   },
   "keywords": [
     "nuvio",
