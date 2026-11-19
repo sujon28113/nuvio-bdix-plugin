@@ -1,102 +1,202 @@
 /**
  * DhakaFlix h5ai Server Interface & HTML Table Parser
- * Replicates exact HTTP POST and GET methods from CloudStream Kotlin BdixDhakaFlix
+ * Optimized for QuickJS / Hermes on Android TV:
+ * - Dead-host circuit breaker
+ * - LRU in-memory caching
+ * - Fast linear regex parsing without DOM
+ * - Relevance ranking to avoid over-crawling
+ * - Partitioned search for TV Server 12
  */
 
 import {
-  cleanTitle,
   nameFromUrl,
   isVideoFile,
-  parseQuality,
-  extractMediaTags,
-  cleanFileName,
   normalizeStreamUrl,
   fetchWithTimeout
 } from "./utils.js";
-import { USER_AGENT } from "./constants.js";
+import { USER_AGENT, REQUEST_TIMEOUT_MS, DEBUG } from "./constants.js";
+import { memoryCache } from "./cache.js";
+import { isHostDead, markHostDead, markHostAlive } from "./circuitBreaker.js";
 
 /**
- * Searches a DhakaFlix server using the native h5ai search POST endpoint.
+ * Returns the optimal search href root.
+ * On Server 12, partitions by first letter for a 4x search speedup.
  *
- * Kotlin BdixDhakaFlix14Provider.kt line 170:
- * POST "$mainUrl/$serverName/"
- * body: {"action":"get","search":{"href":"/$serverName/","pattern":"$query","ignorecase":true}}
- *
- * @param {object} server - Server configuration object
- * @param {string} query - Search query string
- * @returns {Promise<Array<{ href: string, size: number|null, managed?: boolean }>>}
+ * @param {object} server
+ * @param {string} title
+ * @returns {string}
  */
-export async function searchServer(server, query) {
+export function getServerSearchHref(server, title) {
+  if (server.id === "12" && title) {
+    let clean = title.trim();
+    if (/^the\s+/i.test(clean)) clean = clean.substring(4).trim();
+    else if (/^a\s+/i.test(clean)) clean = clean.substring(2).trim();
+    else if (/^an\s+/i.test(clean)) clean = clean.substring(3).trim();
+
+    const firstChar = clean.charAt(0).toUpperCase();
+    if (/[0-9]/.test(firstChar)) {
+      return `/DHAKA-FLIX-12/TV-WEB-Series/TV Series ★  0  —  9/`;
+    }
+    if (/[A-L]/.test(firstChar)) {
+      return `/DHAKA-FLIX-12/TV-WEB-Series/TV Series ♥  A  —  L/`;
+    }
+    if (/[M-R]/.test(firstChar)) {
+      return `/DHAKA-FLIX-12/TV-WEB-Series/TV Series ♦  M  —  R/`;
+    }
+    if (/[S-Z]/.test(firstChar)) {
+      return `/DHAKA-FLIX-12/TV-WEB-Series/TV Series ♦  S  —  Z/`;
+    }
+    return `/DHAKA-FLIX-12/TV-WEB-Series/`;
+  }
+  return `/${server.serverName}/`;
+}
+
+/**
+ * Executes raw h5ai POST search request
+ */
+async function executeSearchRequest(server, href, query) {
   const searchUrl = `${server.mainUrl}/${server.serverName}/`;
   const bodyPayload = JSON.stringify({
     action: "get",
     search: {
-      href: `/${server.serverName}/`,
+      href: href,
       pattern: query,
       ignorecase: true
     }
   });
 
   try {
-    const res = await fetchWithTimeout(searchUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Referer": searchUrl,
-        "User-Agent": USER_AGENT
+    const res = await fetchWithTimeout(
+      searchUrl,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Referer": searchUrl,
+          "User-Agent": USER_AGENT
+        },
+        body: bodyPayload
       },
-      body: bodyPayload
-    });
+      REQUEST_TIMEOUT_MS
+    );
 
-    if (!res.ok) {
-      return [];
-    }
+    if (!res.ok) return [];
 
     const data = await res.json();
-    if (!data || !Array.isArray(data.search)) {
-      return [];
-    }
+    if (!data || !Array.isArray(data.search)) return [];
 
+    markHostAlive(server.mainUrl);
     return data.search;
   } catch (error) {
-    // Server unreachable or timed out (expected if user is not on BDIX ISP network)
+    markHostDead(server.mainUrl);
     return [];
   }
 }
 
 /**
+ * Searches a DhakaFlix server using the native h5ai search POST endpoint.
+ * Includes circuit-breaker check, partitioned routing, and in-memory caching.
+ *
+ * @param {object} server - Server configuration object
+ * @param {string} query - Search query string
+ * @param {string} [targetTitle=""] - Canonical media title
+ * @returns {Promise<Array<{ href: string, size: number|null, managed?: boolean }>>}
+ */
+export async function searchServer(server, query, targetTitle = "") {
+  if (!server || !query) return [];
+
+  // Check Circuit Breaker
+  if (isHostDead(server.mainUrl)) {
+    if (DEBUG) console.log(`[DhakaFlix] Skipping dead server: ${server.name}`);
+    return [];
+  }
+
+  const searchHref = getServerSearchHref(server, targetTitle || query);
+  const cacheKey = `search_${server.id}_${searchHref}_${query.toLowerCase().trim()}`;
+  const cached = memoryCache.get(cacheKey);
+  if (cached) {
+    if (DEBUG) console.log(`[DhakaFlix] Cache hit for search: ${cacheKey}`);
+    return cached;
+  }
+
+  // 1. Primary search
+  let results = await executeSearchRequest(server, searchHref, query);
+
+  // 2. Server 12 fallback if partitioned search found 0 results
+  if (
+    (!results || results.length === 0) &&
+    server.id === "12" &&
+    searchHref !== `/DHAKA-FLIX-12/TV-WEB-Series/`
+  ) {
+    results = await executeSearchRequest(
+      server,
+      `/DHAKA-FLIX-12/TV-WEB-Series/`,
+      query
+    );
+  }
+
+  if (results && results.length > 0) {
+    memoryCache.set(cacheKey, results);
+    return results;
+  }
+
+  return [];
+}
+
+/**
  * Fetches and parses an h5ai directory listing HTML page.
- * Uses lightweight regex parsing strictly safe for Hermes and QuickJS.
+ * Uses in-memory caching and pure regex parser.
  *
  * @param {object} server
  * @param {string} folderHref
  * @returns {Promise<{ folders: Array<{ name: string, href: string }>, files: Array<{ name: string, href: string }> }>}
  */
 export async function fetchDirectoryEntries(server, folderHref) {
+  if (!server || !folderHref) return { folders: [], files: [] };
+
+  if (isHostDead(server.mainUrl)) {
+    return { folders: [], files: [] };
+  }
+
+  const cacheKey = `dir_${server.id}_${folderHref}`;
+  const cached = memoryCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const targetUrl = normalizeStreamUrl(server.mainUrl, folderHref);
 
   try {
-    const res = await fetchWithTimeout(targetUrl, {
-      method: "GET",
-      headers: {
-        "Referer": `${server.mainUrl}/`,
-        "User-Agent": USER_AGENT
-      }
-    });
+    const res = await fetchWithTimeout(
+      targetUrl,
+      {
+        method: "GET",
+        headers: {
+          "Referer": `${server.mainUrl}/`,
+          "User-Agent": USER_AGENT
+        }
+      },
+      REQUEST_TIMEOUT_MS
+    );
 
     if (!res.ok) {
       return { folders: [], files: [] };
     }
 
     const html = await res.text();
-    return parseDirectoryHtml(html, folderHref);
+    const result = parseDirectoryHtml(html, folderHref);
+
+    markHostAlive(server.mainUrl);
+    memoryCache.set(cacheKey, result);
+    return result;
   } catch (error) {
+    markHostDead(server.mainUrl);
     return { folders: [], files: [] };
   }
 }
 
 /**
- * Parses h5ai HTML table entries via pure regex without DOM / Cheerio.
+ * Parses h5ai HTML table entries via fast linear regex without DOM / Cheerio.
  *
  * @param {string} html
  * @param {string} baseHref
@@ -106,7 +206,6 @@ export function parseDirectoryHtml(html, baseHref) {
   const folders = [];
   const files = [];
 
-  // Match table rows <tr>...</tr> in h5ai
   const trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
   let trMatch;
   let foundAnyTr = false;
@@ -115,19 +214,16 @@ export function parseDirectoryHtml(html, baseHref) {
     const trContent = trMatch[1];
     foundAnyTr = true;
 
-    // Check if it's marked as a folder icon or has folder class
     const isFolder =
       /alt=["']folder["']/i.test(trContent) ||
       /class=["'][^"']*folder[^"']*["']/i.test(trContent);
 
-    // Extract link inside td.fb-n or any <a>
     const aMatch = trContent.match(/<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i);
     if (!aMatch) continue;
 
     const rawHref = aMatch[1];
     const rawText = aMatch[2].replace(/<[^>]+>/g, "").trim();
 
-    // Skip parent directory links
     if (
       rawText === ".." ||
       rawText === "../" ||
@@ -154,7 +250,7 @@ export function parseDirectoryHtml(html, baseHref) {
     }
   }
 
-  // Fallback: If no <tr> found (e.g., non-table directory listing), parse all <a> tags
+  // Fallback for minimal non-table listings
   if (!foundAnyTr || (folders.length === 0 && files.length === 0)) {
     const aRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
     let aMatch;
@@ -195,13 +291,6 @@ export function parseDirectoryHtml(html, baseHref) {
   return { folders, files };
 }
 
-/**
- * Resolves relative or absolute path against current directory href.
- *
- * @param {string} baseHref
- * @param {string} relHref
- * @returns {string}
- */
 function resolveRelativeHref(baseHref, relHref) {
   if (relHref.startsWith("/")) return relHref;
   if (relHref.startsWith("http://") || relHref.startsWith("https://")) {
@@ -213,20 +302,22 @@ function resolveRelativeHref(baseHref, relHref) {
 }
 
 const KNOWN_MEDIA_TAGS = new Set([
+  "tv", "series", "show", "shows", "movie", "movies",
   "1080p", "720p", "2160p", "4k", "uhd", "fhd", "hd", "sd", "480p",
   "bluray", "bdrip", "brrip", "webrip", "web", "webdl", "dl", "hdtv", "dvdrip",
   "cam", "hdcam", "telesync", "tc", "hevc", "x264", "x265", "h264", "h265",
   "10bit", "hdr", "hdr10", "dts", "aac", "ac3", "ddp5", "atmos", "sub",
   "esub", "dub", "dubbed", "dual", "audio", "multi", "hindi", "eng", "english",
   "bengali", "bangla", "tamil", "telugu", "pack", "complete", "repack", "proper",
-  "extended", "remastered", "unrated", "directors", "cut", "season", "series", "ep", "episode"
+  "extended", "remastered", "unrated", "directors", "cut", "season", "ep", "episode",
+  "imax", "remux", "criterion", "mkv", "mp4", "avi", "m4v", "webm", "ts"
 ]);
 
 const STOP_WORDS = new Set(["the", "a", "an", "of", "and", "in", "to", "for", "with", "by", "part", "vol"]);
 
 /**
  * Validates if candidate name matches target media title.
- * Prevents false positives (e.g., matching "The Dark Knight" when looking for "Dark").
+ * Prevents false positives while accurately matching TV shows and movies.
  *
  * @param {string} candidateName
  * @param {string} targetTitle
@@ -237,7 +328,10 @@ const STOP_WORDS = new Set(["the", "a", "an", "of", "and", "in", "to", "for", "w
 export function isTitleMatch(candidateName, targetTitle, targetYear, mediaType = "movie") {
   if (!candidateName || !targetTitle) return false;
 
-  const candTokens = candidateName
+  // Clean trailing release group at end (e.g. -MsMod, -mkvC)
+  let cleanCand = candidateName.replace(/-[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)?$/, "");
+
+  const candTokens = cleanCand
     .toLowerCase()
     .replace(/[^a-z0-9]/g, " ")
     .split(/\s+/)
@@ -252,44 +346,69 @@ export function isTitleMatch(candidateName, targetTitle, targetYear, mediaType =
   const sigTarget = targetTokens.filter((t) => !STOP_WORDS.has(t));
   const reqTarget = sigTarget.length > 0 ? sigTarget : targetTokens;
 
-  // 1. All significant words of target title must appear in candidate
+  // All significant target tokens must appear in candidate
   for (const token of reqTarget) {
     if (!candTokens.includes(token)) {
       return false;
     }
   }
 
-  // 2. Year check: If both candidate and target specify a 4-digit year, check mismatch
-  if (targetYear) {
-    const yearMatch = candidateName.match(/\b(19\d{2}|20\d{2})\b/);
-    if (yearMatch) {
-      const candYear = parseInt(yearMatch[1], 10);
+  // For movies: Check year if both candidate and target specify a 4-digit year
+  if (mediaType === "movie" && targetYear) {
+    const yearMatches = candidateName.match(/\b(19\d{2}|20\d{2})\b/g);
+    if (yearMatches && yearMatches.length > 0) {
       const tgtYear = parseInt(targetYear, 10);
-      if (Math.abs(candYear - tgtYear) > 1) {
-        return false;
-      }
+      const hasCloseYear = yearMatches.some((y) => Math.abs(parseInt(y, 10) - tgtYear) <= 1);
+      if (!hasCloseYear) return false;
     }
   }
 
-  // 3. Remove target tokens from candidate and inspect remaining words
+  // Remove target tokens from candidate
   let remaining = candTokens.slice();
   for (const t of targetTokens) {
     const idx = remaining.indexOf(t);
     if (idx !== -1) remaining.splice(idx, 1);
   }
 
-  // Filter out known technical media tags, numbers, release years, etc.
   const foreignTokens = remaining.filter((t) => {
     if (STOP_WORDS.has(t)) return false;
     if (KNOWN_MEDIA_TAGS.has(t)) return false;
     if (/^(19\d{2}|20\d{2})$/.test(t)) return false;
-    if (/^[se]\d+$/i.test(t)) return false;
+    if (/^s\d+(e\d+)?$/i.test(t)) return false;
+    if (/^e\d+$/i.test(t)) return false;
+    if (/^\d+x\d+$/i.test(t)) return false;
     if (/^\d{1,2}$/.test(t)) return false;
     return true;
   });
 
-  // If there are foreign non-tag words (e.g. "knight" when target is "dark"), reject
   return foreignTokens.length === 0;
+}
+
+/**
+ * Calculates a match score to rank candidate folders (higher is better).
+ *
+ * @param {string} candidateName
+ * @param {string} targetTitle
+ * @param {string} targetYear
+ * @returns {number}
+ */
+export function scoreMatch(candidateName, targetTitle, targetYear) {
+  let score = 0;
+  const lowerName = candidateName.toLowerCase();
+  const lowerTitle = targetTitle.toLowerCase();
+
+  // Match title words
+  if (lowerName.includes(lowerTitle)) score += 50;
+
+  // Match year
+  if (targetYear && lowerName.includes(targetYear)) score += 30;
+
+  // Prefer 1080p / 4K / BluRay
+  if (lowerName.includes("1080p")) score += 10;
+  if (lowerName.includes("bluray")) score += 5;
+  if (lowerName.includes("hevc") || lowerName.includes("x265")) score += 5;
+
+  return score;
 }
 
 /**
@@ -314,7 +433,7 @@ export function matchesSeasonFolder(folderName, targetSeason) {
  * @param {string} fileName
  * @param {number} targetSeason
  * @param {number} targetEpisode
- * @param {boolean} isInSeasonFolder - If true, file is already inside targetSeason folder
+ * @param {boolean} isInSeasonFolder
  * @returns {boolean}
  */
 export function matchesEpisodeFile(fileName, targetSeason, targetEpisode, isInSeasonFolder = false) {
@@ -338,13 +457,11 @@ export function matchesEpisodeFile(fileName, targetSeason, targetEpisode, isInSe
 
   // 3. If already inside the correct season folder:
   if (isInSeasonFolder) {
-    // Match "EP 05", "Episode 5", "E05"
     const epMatch = fileName.match(/(?:ep|episode|e)[.\s_-]*0*(\d+)\b/i);
     if (epMatch) {
       return parseInt(epMatch[1], 10) === targetEpisode;
     }
 
-    // Match isolated number e.g. "Breaking Bad 05.mkv"
     const numMatch = fileName.match(/(?:^|[\s._\-\[])0*(\d{1,3})(?:[\s._\-\]]|$)/);
     if (numMatch) {
       return parseInt(numMatch[1], 10) === targetEpisode;
@@ -352,8 +469,4 @@ export function matchesEpisodeFile(fileName, targetSeason, targetEpisode, isInSe
   }
 
   return false;
-}
-
-function escapeRegExp(string) {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

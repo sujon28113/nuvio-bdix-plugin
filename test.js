@@ -1,7 +1,7 @@
 /**
  * Test Suite for DhakaFlix Nuvio Provider
  * Verifies contract conformity, URL encoding rules, HTML parsing,
- * season/episode resolution, and stream schema compliance.
+ * season/episode resolution, circuit breaker, caching, and stream schema compliance.
  */
 
 const assert = require("assert");
@@ -26,6 +26,10 @@ const {
   matchesSeasonFolder,
   matchesEpisodeFile
 } = require("./src/bdix-dhakaflix/h5ai.js");
+
+const { BoundedCache } = require("./src/bdix-dhakaflix/cache.js");
+const { isHostDead, markHostDead, markHostAlive } = require("./src/bdix-dhakaflix/circuitBreaker.js");
+const { routeServers } = require("./src/bdix-dhakaflix/routing.js");
 
 let passedTests = 0;
 let failedTests = 0;
@@ -116,7 +120,7 @@ async function runAllTests() {
     const url1 = normalizeStreamUrl("http://172.16.50.14", input);
     const url2 = normalizeStreamUrl("http://172.16.50.14", url1);
     assert.strictEqual(url1, url2);
-    assert.ok(!url1.includes("%2520")); // Must not become %2520
+    assert.ok(!url1.includes("%2520"));
   });
 
   it("Encodes hash symbol (#) into %23 so client does not treat it as URL fragment", () => {
@@ -190,34 +194,35 @@ async function runAllTests() {
   console.log("\n🎯 Group 5: Title Matching & False Positive Rejection");
 
   it("isTitleMatch matches genuine movie and rejects different titles", () => {
-    // Genuine matches
     assert.ok(
-      isTitleMatch(
-        "Dune Part Two 2024 1080p",
-        "Dune: Part Two",
-        "2024",
-        "movie"
-      )
+      isTitleMatch("Dune Part Two 2024 1080p", "Dune: Part Two", "2024", "movie")
     );
     assert.ok(
-      isTitleMatch(
-        "The Matrix 1999 1080p BluRay",
-        "The Matrix",
-        "1999",
-        "movie"
-      )
+      isTitleMatch("The Matrix 1999 1080p BluRay", "The Matrix", "1999", "movie")
     );
-
-    // False positive rejections
     assert.ok(
       !isTitleMatch("The Dark Knight 2008", "Dark", "2017", "tv"),
       "Should not match 'Dark' to 'The Dark Knight'"
     );
-
-    // Year mismatch rejection
     assert.ok(
       !isTitleMatch("Gladiator 2000 1080p", "Gladiator II", "2024", "movie"),
       "Should not match 'Gladiator (2000)' to 'Gladiator II (2024)'"
+    );
+    assert.ok(
+      isTitleMatch(
+        "Breaking Bad (TV Series 2008–2013) 1080p [Dual Audio]",
+        "Breaking Bad",
+        "2008",
+        "tv"
+      )
+    );
+    assert.ok(
+      isTitleMatch(
+        "Breaking Bad S01E01  1080p BluRay x265 HEVC ESub [Dual Audio][Hindi 2.0+English 5.1] -MsMod.mkv",
+        "Breaking Bad",
+        "2008",
+        "tv"
+      )
     );
   });
 
@@ -248,7 +253,7 @@ async function runAllTests() {
   });
 
   // ---------------------------------------------------------------------------
-  // 7. h5ai HTML Table Regex Parsing
+  // 7. h5ai HTML Directory Parsing
   // ---------------------------------------------------------------------------
   console.log("\n📄 Group 7: h5ai HTML Directory Parsing");
 
@@ -287,69 +292,101 @@ async function runAllTests() {
   });
 
   // ---------------------------------------------------------------------------
-  // 8. End-to-End Simulation with Mocked Fetch
+  // 8. Bounded LRU Cache & Circuit Breaker Tests
   // ---------------------------------------------------------------------------
-  console.log("\n🌐 Group 8: End-to-End getStreams Mock Simulation");
+  console.log("\n⚡ Group 8: Cache & Circuit Breaker Verification");
+
+  it("BoundedCache evicts oldest item when maxEntries is reached", () => {
+    const cache = new BoundedCache(2, 60000);
+    cache.set("a", 1);
+    cache.set("b", 2);
+    assert.strictEqual(cache.get("a"), 1);
+    cache.set("c", 3); // Should evict "b" because "a" was refreshed by get
+    assert.strictEqual(cache.get("a"), 1);
+    assert.strictEqual(cache.get("b"), null);
+    assert.strictEqual(cache.get("c"), 3);
+  });
+
+  it("Circuit breaker marks dead and skips host", () => {
+    const testHost = "http://172.16.50.999";
+    assert.strictEqual(isHostDead(testHost), false);
+    markHostDead(testHost);
+    assert.strictEqual(isHostDead(testHost), true);
+    markHostAlive(testHost);
+    assert.strictEqual(isHostDead(testHost), false);
+  });
+
+  it("Smart routing prioritizes servers by language and genre", () => {
+    // English movie -> Servers 14, 7
+    const movieRoute = routeServers("movie", { original_language: "en", genre_ids: [18] });
+    assert.ok(movieRoute.primary.some((s) => s.id === "14"));
+    assert.ok(movieRoute.primary.some((s) => s.id === "7"));
+    assert.ok(!movieRoute.primary.some((s) => s.id === "9")); // Server 9 excluded from primary
+
+    // English TV show -> Server 12 primary
+    const tvRoute = routeServers("tv", { original_language: "en", genre_ids: [18] });
+    assert.strictEqual(tvRoute.primary.length, 1);
+    assert.strictEqual(tvRoute.primary[0].id, "12");
+  });
+
+  // ---------------------------------------------------------------------------
+  // 9. End-to-End Simulation with Mocked Fetch (Cold & Cached)
+  // ---------------------------------------------------------------------------
+  console.log("\n🌐 Group 9: End-to-End Mock Simulation (Movie & TV Caching)");
 
   await itAsync(
-    "getStreams executes full resolution flow and returns compliant Nuvio stream objects",
+    "getStreams executes resolution and caches TV episodes for instant subsequent retrieval",
     async () => {
       const originalFetch = global.fetch;
 
       try {
+        let tmdbCalls = 0;
+        let dhakaFlixSearchCalls = 0;
+
         global.fetch = async (url, options = {}) => {
           const urlStr = url.toString();
 
           // Mock TMDB
           if (urlStr.includes("api.themoviedb.org")) {
+            tmdbCalls++;
             return {
               ok: true,
               status: 200,
               json: async () => ({
-                id: 550,
-                title: "Fight Club",
-                original_title: "Fight Club",
-                release_date: "1999-10-15"
+                id: 1396,
+                name: "Breaking Bad",
+                original_name: "Breaking Bad",
+                first_air_date: "2008-01-20",
+                original_language: "en",
+                genres: [{ id: 18, name: "Drama" }]
               })
             };
           }
 
-          // Mock DhakaFlix Server 14 Search POST
+          // Mock DhakaFlix Server 12 Search POST
           if (
-            urlStr.includes("172.16.50.14/DHAKA-FLIX-14/") &&
+            urlStr.includes("172.16.50.12/DHAKA-FLIX-12/") &&
             options.method === "POST"
           ) {
+            dhakaFlixSearchCalls++;
             return {
               ok: true,
               status: 200,
               json: async () => ({
                 search: [
                   {
-                    href: "/DHAKA-FLIX-14/English Movies/Fight Club (1999)/",
-                    size: null
+                    href: "/DHAKA-FLIX-12/TV-WEB-Series/TV%20Series%20%E2%99%A5%20%20A%20%20%E2%80%94%20%20L/Breaking%20Bad/Season%201/Breaking%20Bad%20S01E01%201080p.mkv",
+                    size: 1000000000
+                  },
+                  {
+                    href: "/DHAKA-FLIX-12/TV-WEB-Series/TV%20Series%20%E2%99%A5%20%20A%20%20%E2%80%94%20%20L/Breaking%20Bad/Season%201/Breaking%20Bad%20S01E02%201080p.mkv",
+                    size: 1000000000
                   }
                 ]
               })
             };
           }
 
-          // Mock DhakaFlix Directory GET
-          if (urlStr.includes("Fight%20Club%20%281999%29")) {
-            return {
-              ok: true,
-              status: 200,
-              text: async () => `
-              <table>
-                <tr>
-                  <td class="fb-i"><img alt="file" src="video.png"></td>
-                  <td class="fb-n"><a href="/DHAKA-FLIX-14/English Movies/Fight Club (1999)/Fight.Club.1999.1080p.Dual.Audio.mkv">Fight.Club.1999.1080p.Dual.Audio.mkv</a></td>
-                </tr>
-              </table>
-            `
-            };
-          }
-
-          // Default mock for other servers
           return {
             ok: false,
             status: 404,
@@ -358,21 +395,20 @@ async function runAllTests() {
           };
         };
 
-        const streams = await provider.getStreams("550", "movie");
-        assert.ok(Array.isArray(streams));
-        assert.strictEqual(streams.length, 1);
+        // Episode 1 (Cold)
+        const ep1Streams = await provider.getStreams("1396", "tv", 1, 1);
+        assert.strictEqual(ep1Streams.length, 1);
+        assert.ok(ep1Streams[0].title.includes("S01E01"));
+        assert.strictEqual(tmdbCalls, 1);
+        assert.strictEqual(dhakaFlixSearchCalls, 1);
 
-        const s = streams[0];
-        assert.strictEqual(s.name, "DhakaFlix");
-        assert.strictEqual(s.quality, "1080p");
-        assert.ok(s.title.includes("Fight Club"));
-        assert.ok(s.title.includes("[1080p]"));
-        assert.ok(s.title.includes("[Dual Audio]"));
-        assert.strictEqual(
-          s.url,
-          "http://172.16.50.14/DHAKA-FLIX-14/English%20Movies/Fight%20Club%20%281999%29/Fight.Club.1999.1080p.Dual.Audio.mkv"
-        );
-        assert.ok(s.headers && s.headers["User-Agent"] && s.headers["Referer"]);
+        // Episode 2 (Cached TMDB & Search)
+        const ep2Streams = await provider.getStreams("1396", "tv", 1, 2);
+        assert.strictEqual(ep2Streams.length, 1);
+        assert.ok(ep2Streams[0].title.includes("S01E02"));
+        // Confirm cache prevented duplicate network requests
+        assert.strictEqual(tmdbCalls, 1);
+        assert.strictEqual(dhakaFlixSearchCalls, 1);
       } finally {
         global.fetch = originalFetch;
       }

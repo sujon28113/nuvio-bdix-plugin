@@ -3,6 +3,9 @@
  * Reverse-engineered from CloudStream BdixDhakaFlix extension
  */
 
+// Debug logging flag (disabled by default for production performance)
+export const DEBUG = false;
+
 // TMDB API Key: Configured with user's TMDB v3 API Key
 export const TMDB_API_KEY = "e80ea2a38c45dc7aaccf08b1babcd3a7";
 
@@ -18,8 +21,9 @@ export const DEFAULT_HEADERS = {
   "Accept": "*/*"
 };
 
-// Network timeout for BDIX servers (fails fast if device is off-BDIX network)
-export const REQUEST_TIMEOUT_MS = 6000;
+// Aggressive network timeouts (Step 2, Rule 2: 3000ms for BDIX, 4000ms for TMDB)
+export const REQUEST_TIMEOUT_MS = 3000;
+export const TMDB_TIMEOUT_MS = 4000;
 
 // All known DhakaFlix BDIX Cluster Servers
 export const SERVERS = [
@@ -29,6 +33,7 @@ export const SERVERS = [
     mainUrl: "http://172.16.50.14",
     serverName: "DHAKA-FLIX-14",
     mediaTypes: ["movie", "tv"],
+    categories: ["english_movie", "hindi_movie", "south_movie", "animation_movie", "korean_tv"],
     tvKeywords: [
       "KOREAN TV & WEB Series",
       "KOREAN%20TV%20%26%20WEB%20Series",
@@ -42,6 +47,7 @@ export const SERVERS = [
     mainUrl: "http://172.16.50.12",
     serverName: "DHAKA-FLIX-12",
     mediaTypes: ["tv"],
+    categories: ["western_tv", "all_tv"],
     tvKeywords: ["TV-WEB-Series"],
     description: "Dedicated TV & Web Series Server (0-9, A-L, M-R, S-Z)"
   },
@@ -51,6 +57,7 @@ export const SERVERS = [
     mainUrl: "http://172.16.50.7",
     serverName: "DHAKA-FLIX-7",
     mediaTypes: ["movie"],
+    categories: ["english_movie", "foreign_movie", "bangla_movie", "3d_movie"],
     tvKeywords: [],
     description: "English & Foreign Language Movies (3D, Japanese, Korean, Bangla, etc.)"
   },
@@ -60,6 +67,7 @@ export const SERVERS = [
     mainUrl: "http://172.16.50.9",
     serverName: "DHAKA-FLIX-9",
     mediaTypes: ["movie", "tv"],
+    categories: ["anime_tv", "korean_tv", "doc", "wwe"],
     tvKeywords: ["Awards", "WWE", "KOREAN", "Documentary", "Anime"],
     description: "Anime, Cartoons, Documentaries, WWE & Awards"
   }

@@ -1,6 +1,6 @@
 /**
  * bdix-dhakaflix - Built for Nuvio
- * Generated: 2026-11-19T11:14:16.368Z
+ * Generated: 2026-11-19T11:40:24.722Z
  */
 var __async = (__this, __arguments, generator) => {
   return new Promise((resolve, reject) => {
@@ -24,8 +24,10 @@ var __async = (__this, __arguments, generator) => {
 };
 
 // src/bdix-dhakaflix/constants.js
+var DEBUG = false;
 var USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-var REQUEST_TIMEOUT_MS = 6e3;
+var REQUEST_TIMEOUT_MS = 3e3;
+var TMDB_TIMEOUT_MS = 4e3;
 var SERVERS = [
   {
     id: "14",
@@ -33,6 +35,7 @@ var SERVERS = [
     mainUrl: "http://172.16.50.14",
     serverName: "DHAKA-FLIX-14",
     mediaTypes: ["movie", "tv"],
+    categories: ["english_movie", "hindi_movie", "south_movie", "animation_movie", "korean_tv"],
     tvKeywords: [
       "KOREAN TV & WEB Series",
       "KOREAN%20TV%20%26%20WEB%20Series",
@@ -46,6 +49,7 @@ var SERVERS = [
     mainUrl: "http://172.16.50.12",
     serverName: "DHAKA-FLIX-12",
     mediaTypes: ["tv"],
+    categories: ["western_tv", "all_tv"],
     tvKeywords: ["TV-WEB-Series"],
     description: "Dedicated TV & Web Series Server (0-9, A-L, M-R, S-Z)"
   },
@@ -55,6 +59,7 @@ var SERVERS = [
     mainUrl: "http://172.16.50.7",
     serverName: "DHAKA-FLIX-7",
     mediaTypes: ["movie"],
+    categories: ["english_movie", "foreign_movie", "bangla_movie", "3d_movie"],
     tvKeywords: [],
     description: "English & Foreign Language Movies (3D, Japanese, Korean, Bangla, etc.)"
   },
@@ -64,6 +69,7 @@ var SERVERS = [
     mainUrl: "http://172.16.50.9",
     serverName: "DHAKA-FLIX-9",
     mediaTypes: ["movie", "tv"],
+    categories: ["anime_tv", "korean_tv", "doc", "wwe"],
     tvKeywords: ["Awards", "WWE", "KOREAN", "Documentary", "Anime"],
     description: "Anime, Cartoons, Documentaries, WWE & Awards"
   }
@@ -223,6 +229,47 @@ function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
   });
 }
 
+// src/bdix-dhakaflix/cache.js
+var BoundedCache = class {
+  constructor(maxEntries = 50, ttlMs = 20 * 60 * 1e3) {
+    this.maxEntries = maxEntries;
+    this.ttlMs = ttlMs;
+    this.map = /* @__PURE__ */ new Map();
+  }
+  get(key) {
+    const entry = this.map.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.expiry) {
+      this.map.delete(key);
+      return null;
+    }
+    this.map.delete(key);
+    this.map.set(key, entry);
+    return entry.value;
+  }
+  set(key, value) {
+    if (this.map.has(key)) {
+      this.map.delete(key);
+    } else if (this.map.size >= this.maxEntries) {
+      const oldestKey = this.map.keys().next().value;
+      if (oldestKey !== void 0) {
+        this.map.delete(oldestKey);
+      }
+    }
+    this.map.set(key, {
+      value,
+      expiry: Date.now() + this.ttlMs
+    });
+  }
+  clear() {
+    this.map.clear();
+  }
+  size() {
+    return this.map.size;
+  }
+};
+var memoryCache = new BoundedCache(50, 20 * 60 * 1e3);
+
 // src/bdix-dhakaflix/tmdb.js
 function getTmdbMetadata(tmdbId, mediaType, apiKey) {
   return __async(this, null, function* () {
@@ -230,30 +277,45 @@ function getTmdbMetadata(tmdbId, mediaType, apiKey) {
       return null;
     }
     const type = mediaType === "tv" || mediaType === "series" ? "tv" : "movie";
+    const cacheKey = `tmdb_${type}_${tmdbId}`;
+    const cached = memoryCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
     const url = `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${apiKey}`;
     try {
-      const res = yield fetchWithTimeout(url, { method: "GET" }, 8e3);
+      const res = yield fetchWithTimeout(url, { method: "GET" }, TMDB_TIMEOUT_MS);
       if (!res.ok) {
         console.error(`[DhakaFlix] TMDB API returned HTTP ${res.status} for ${type}/${tmdbId}`);
         return null;
       }
       const data = yield res.json();
       if (!data) return null;
+      const genreIds = Array.isArray(data.genres) ? data.genres.map((g) => g.id).filter(Boolean) : Array.isArray(data.genre_ids) ? data.genre_ids : [];
+      let result = null;
       if (type === "tv") {
         const year = data.first_air_date ? data.first_air_date.split("-")[0] : "";
-        return {
+        result = {
           title: data.name || data.original_name || "",
           original_title: data.original_name || "",
-          year
+          year,
+          original_language: (data.original_language || "en").toLowerCase(),
+          genre_ids: genreIds
         };
       } else {
         const year = data.release_date ? data.release_date.split("-")[0] : "";
-        return {
+        result = {
           title: data.title || data.original_title || "",
           original_title: data.original_title || "",
-          year
+          year,
+          original_language: (data.original_language || "en").toLowerCase(),
+          genre_ids: genreIds
         };
       }
+      if (result && result.title) {
+        memoryCache.set(cacheKey, result);
+      }
+      return result;
     } catch (error) {
       console.error(`[DhakaFlix] Failed to resolve TMDB metadata: ${error.message}`);
       return null;
@@ -261,58 +323,193 @@ function getTmdbMetadata(tmdbId, mediaType, apiKey) {
   });
 }
 
+// src/bdix-dhakaflix/routing.js
+function routeServers(mediaType, meta) {
+  const lang = (meta.original_language || "").toLowerCase();
+  const genres = Array.isArray(meta.genre_ids) ? meta.genre_ids : [];
+  const isAnimation = genres.includes(16);
+  const allMatchingType = SERVERS.filter((s) => s.mediaTypes.includes(mediaType));
+  let primaryIds = [];
+  let fallbackIds = [];
+  if (mediaType === "movie") {
+    if (isAnimation) {
+      primaryIds = ["14", "9"];
+      fallbackIds = ["7"];
+    } else if (lang === "en") {
+      primaryIds = ["14", "7"];
+      fallbackIds = [];
+    } else if (["hi", "bn", "ta", "te", "ml", "kn"].includes(lang)) {
+      primaryIds = ["14", "7"];
+      fallbackIds = [];
+    } else if (["ja", "ko", "zh"].includes(lang)) {
+      primaryIds = ["7", "14"];
+      fallbackIds = ["9"];
+    } else {
+      primaryIds = ["14", "7"];
+      fallbackIds = ["9"];
+    }
+  } else {
+    if (lang === "ko" || /korean/i.test(meta.title || "")) {
+      primaryIds = ["14", "9"];
+      fallbackIds = ["12"];
+    } else if (isAnimation || lang === "ja") {
+      primaryIds = ["9", "12"];
+      fallbackIds = ["14"];
+    } else {
+      primaryIds = ["12"];
+      fallbackIds = ["14", "9"];
+    }
+  }
+  const primary = primaryIds.map((id) => allMatchingType.find((s) => s.id === id)).filter(Boolean);
+  const fallback = fallbackIds.map((id) => allMatchingType.find((s) => s.id === id)).filter(Boolean);
+  return { primary, fallback };
+}
+
+// src/bdix-dhakaflix/circuitBreaker.js
+var deadHosts = /* @__PURE__ */ new Map();
+var DEAD_HOST_TTL_MS = 10 * 60 * 1e3;
+function isHostDead(hostUrl) {
+  if (!hostUrl) return false;
+  const deadUntil = deadHosts.get(hostUrl);
+  if (!deadUntil) return false;
+  if (Date.now() > deadUntil) {
+    deadHosts.delete(hostUrl);
+    return false;
+  }
+  return true;
+}
+function markHostDead(hostUrl) {
+  if (!hostUrl) return;
+  deadHosts.set(hostUrl, Date.now() + DEAD_HOST_TTL_MS);
+}
+function markHostAlive(hostUrl) {
+  if (!hostUrl) return;
+  deadHosts.delete(hostUrl);
+}
+
 // src/bdix-dhakaflix/h5ai.js
-function searchServer(server, query) {
+function getServerSearchHref(server, title) {
+  if (server.id === "12" && title) {
+    let clean = title.trim();
+    if (/^the\s+/i.test(clean)) clean = clean.substring(4).trim();
+    else if (/^a\s+/i.test(clean)) clean = clean.substring(2).trim();
+    else if (/^an\s+/i.test(clean)) clean = clean.substring(3).trim();
+    const firstChar = clean.charAt(0).toUpperCase();
+    if (/[0-9]/.test(firstChar)) {
+      return `/DHAKA-FLIX-12/TV-WEB-Series/TV Series \u2605  0  \u2014  9/`;
+    }
+    if (/[A-L]/.test(firstChar)) {
+      return `/DHAKA-FLIX-12/TV-WEB-Series/TV Series \u2665  A  \u2014  L/`;
+    }
+    if (/[M-R]/.test(firstChar)) {
+      return `/DHAKA-FLIX-12/TV-WEB-Series/TV Series \u2666  M  \u2014  R/`;
+    }
+    if (/[S-Z]/.test(firstChar)) {
+      return `/DHAKA-FLIX-12/TV-WEB-Series/TV Series \u2666  S  \u2014  Z/`;
+    }
+    return `/DHAKA-FLIX-12/TV-WEB-Series/`;
+  }
+  return `/${server.serverName}/`;
+}
+function executeSearchRequest(server, href, query) {
   return __async(this, null, function* () {
     const searchUrl = `${server.mainUrl}/${server.serverName}/`;
     const bodyPayload = JSON.stringify({
       action: "get",
       search: {
-        href: `/${server.serverName}/`,
+        href,
         pattern: query,
         ignorecase: true
       }
     });
     try {
-      const res = yield fetchWithTimeout(searchUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Referer": searchUrl,
-          "User-Agent": USER_AGENT
+      const res = yield fetchWithTimeout(
+        searchUrl,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Referer": searchUrl,
+            "User-Agent": USER_AGENT
+          },
+          body: bodyPayload
         },
-        body: bodyPayload
-      });
-      if (!res.ok) {
-        return [];
-      }
+        REQUEST_TIMEOUT_MS
+      );
+      if (!res.ok) return [];
       const data = yield res.json();
-      if (!data || !Array.isArray(data.search)) {
-        return [];
-      }
+      if (!data || !Array.isArray(data.search)) return [];
+      markHostAlive(server.mainUrl);
       return data.search;
     } catch (error) {
+      markHostDead(server.mainUrl);
       return [];
     }
   });
 }
+function searchServer(server, query, targetTitle = "") {
+  return __async(this, null, function* () {
+    if (!server || !query) return [];
+    if (isHostDead(server.mainUrl)) {
+      if (DEBUG) console.log(`[DhakaFlix] Skipping dead server: ${server.name}`);
+      return [];
+    }
+    const searchHref = getServerSearchHref(server, targetTitle || query);
+    const cacheKey = `search_${server.id}_${searchHref}_${query.toLowerCase().trim()}`;
+    const cached = memoryCache.get(cacheKey);
+    if (cached) {
+      if (DEBUG) console.log(`[DhakaFlix] Cache hit for search: ${cacheKey}`);
+      return cached;
+    }
+    let results = yield executeSearchRequest(server, searchHref, query);
+    if ((!results || results.length === 0) && server.id === "12" && searchHref !== `/DHAKA-FLIX-12/TV-WEB-Series/`) {
+      results = yield executeSearchRequest(
+        server,
+        `/DHAKA-FLIX-12/TV-WEB-Series/`,
+        query
+      );
+    }
+    if (results && results.length > 0) {
+      memoryCache.set(cacheKey, results);
+      return results;
+    }
+    return [];
+  });
+}
 function fetchDirectoryEntries(server, folderHref) {
   return __async(this, null, function* () {
+    if (!server || !folderHref) return { folders: [], files: [] };
+    if (isHostDead(server.mainUrl)) {
+      return { folders: [], files: [] };
+    }
+    const cacheKey = `dir_${server.id}_${folderHref}`;
+    const cached = memoryCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
     const targetUrl = normalizeStreamUrl(server.mainUrl, folderHref);
     try {
-      const res = yield fetchWithTimeout(targetUrl, {
-        method: "GET",
-        headers: {
-          "Referer": `${server.mainUrl}/`,
-          "User-Agent": USER_AGENT
-        }
-      });
+      const res = yield fetchWithTimeout(
+        targetUrl,
+        {
+          method: "GET",
+          headers: {
+            "Referer": `${server.mainUrl}/`,
+            "User-Agent": USER_AGENT
+          }
+        },
+        REQUEST_TIMEOUT_MS
+      );
       if (!res.ok) {
         return { folders: [], files: [] };
       }
       const html = yield res.text();
-      return parseDirectoryHtml(html, folderHref);
+      const result = parseDirectoryHtml(html, folderHref);
+      markHostAlive(server.mainUrl);
+      memoryCache.set(cacheKey, result);
+      return result;
     } catch (error) {
+      markHostDead(server.mainUrl);
       return { folders: [], files: [] };
     }
   });
@@ -382,6 +579,12 @@ function resolveRelativeHref(baseHref, relHref) {
   return cleanBase + relHref;
 }
 var KNOWN_MEDIA_TAGS = /* @__PURE__ */ new Set([
+  "tv",
+  "series",
+  "show",
+  "shows",
+  "movie",
+  "movies",
   "1080p",
   "720p",
   "2160p",
@@ -441,14 +644,23 @@ var KNOWN_MEDIA_TAGS = /* @__PURE__ */ new Set([
   "directors",
   "cut",
   "season",
-  "series",
   "ep",
-  "episode"
+  "episode",
+  "imax",
+  "remux",
+  "criterion",
+  "mkv",
+  "mp4",
+  "avi",
+  "m4v",
+  "webm",
+  "ts"
 ]);
 var STOP_WORDS = /* @__PURE__ */ new Set(["the", "a", "an", "of", "and", "in", "to", "for", "with", "by", "part", "vol"]);
 function isTitleMatch(candidateName, targetTitle, targetYear, mediaType = "movie") {
   if (!candidateName || !targetTitle) return false;
-  const candTokens = candidateName.toLowerCase().replace(/[^a-z0-9]/g, " ").split(/\s+/).filter(Boolean);
+  let cleanCand = candidateName.replace(/-[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)?$/, "");
+  const candTokens = cleanCand.toLowerCase().replace(/[^a-z0-9]/g, " ").split(/\s+/).filter(Boolean);
   const targetTokens = targetTitle.toLowerCase().replace(/[^a-z0-9]/g, " ").split(/\s+/).filter(Boolean);
   const sigTarget = targetTokens.filter((t) => !STOP_WORDS.has(t));
   const reqTarget = sigTarget.length > 0 ? sigTarget : targetTokens;
@@ -457,14 +669,12 @@ function isTitleMatch(candidateName, targetTitle, targetYear, mediaType = "movie
       return false;
     }
   }
-  if (targetYear) {
-    const yearMatch = candidateName.match(/\b(19\d{2}|20\d{2})\b/);
-    if (yearMatch) {
-      const candYear = parseInt(yearMatch[1], 10);
+  if (mediaType === "movie" && targetYear) {
+    const yearMatches = candidateName.match(/\b(19\d{2}|20\d{2})\b/g);
+    if (yearMatches && yearMatches.length > 0) {
       const tgtYear = parseInt(targetYear, 10);
-      if (Math.abs(candYear - tgtYear) > 1) {
-        return false;
-      }
+      const hasCloseYear = yearMatches.some((y) => Math.abs(parseInt(y, 10) - tgtYear) <= 1);
+      if (!hasCloseYear) return false;
     }
   }
   let remaining = candTokens.slice();
@@ -476,11 +686,24 @@ function isTitleMatch(candidateName, targetTitle, targetYear, mediaType = "movie
     if (STOP_WORDS.has(t)) return false;
     if (KNOWN_MEDIA_TAGS.has(t)) return false;
     if (/^(19\d{2}|20\d{2})$/.test(t)) return false;
-    if (/^[se]\d+$/i.test(t)) return false;
+    if (/^s\d+(e\d+)?$/i.test(t)) return false;
+    if (/^e\d+$/i.test(t)) return false;
+    if (/^\d+x\d+$/i.test(t)) return false;
     if (/^\d{1,2}$/.test(t)) return false;
     return true;
   });
   return foreignTokens.length === 0;
+}
+function scoreMatch(candidateName, targetTitle, targetYear) {
+  let score = 0;
+  const lowerName = candidateName.toLowerCase();
+  const lowerTitle = targetTitle.toLowerCase();
+  if (lowerName.includes(lowerTitle)) score += 50;
+  if (targetYear && lowerName.includes(targetYear)) score += 30;
+  if (lowerName.includes("1080p")) score += 10;
+  if (lowerName.includes("bluray")) score += 5;
+  if (lowerName.includes("hevc") || lowerName.includes("x265")) score += 5;
+  return score;
 }
 function matchesSeasonFolder(folderName, targetSeason) {
   if (!folderName) return false;
@@ -523,19 +746,18 @@ var FALLBACK_TMDB_KEY = "e6333b32409e02a4a6eba6fb7ff866bb";
 function getStreams(tmdbId, mediaType = "movie", season = null, episode = null) {
   return __async(this, null, function* () {
     try {
-      console.log(
-        `[DhakaFlix] Request: ${mediaType} TMDB:${tmdbId}${mediaType === "tv" ? ` S:${season} E:${episode}` : ""}`
-      );
+      if (DEBUG) {
+        console.log(
+          `[DhakaFlix] Request: ${mediaType} TMDB:${tmdbId}${mediaType === "tv" ? ` S:${season} E:${episode}` : ""}`
+        );
+      }
       let apiKey = TMDB_API_KEY;
       if (!apiKey || apiKey === "YOUR_TMDB_API_KEY_HERE") {
         if (FALLBACK_TMDB_KEY) {
-          console.warn(
-            "[DhakaFlix] Warning: TMDB_API_KEY is unconfigured ('YOUR_TMDB_API_KEY_HERE'). Using reference fallback key. Please configure your personal key at the top of the provider."
-          );
           apiKey = FALLBACK_TMDB_KEY;
         } else {
           console.error(
-            "[DhakaFlix] ERROR: TMDB_API_KEY is not configured! Please replace 'YOUR_TMDB_API_KEY_HERE' at the top of the file with your valid TMDB v3 API key."
+            "[DhakaFlix] ERROR: TMDB_API_KEY is not configured! Please set a valid TMDB v3 API key."
           );
           return [];
         }
@@ -562,33 +784,28 @@ function getStreams(tmdbId, mediaType = "movie", season = null, episode = null) 
         console.error(`[DhakaFlix] Failed to resolve TMDB metadata for ${type} ${tmdbId}`);
         return [];
       }
-      console.log(
-        `[DhakaFlix] Resolved TMDB: "${meta.title}" (${meta.year || "Unknown Year"})`
-      );
-      const candidateServers = SERVERS.filter((s) => s.mediaTypes.includes(type));
       const searchQueries = generateSearchQueries(meta.title, meta.original_title);
-      console.log(
-        `[DhakaFlix] Searching ${candidateServers.length} server(s) with queries: ${JSON.stringify(
-          searchQueries
-        )}`
-      );
-      const serverPromises = candidateServers.map(
-        (server) => processServer(server, type, meta, targetSeason, targetEpisode, searchQueries)
-      );
-      const settledResults = yield Promise.allSettled(serverPromises);
+      const { primary, fallback } = routeServers(type, meta);
       const allStreams = [];
       const seenUrls = /* @__PURE__ */ new Set();
-      for (const result of settledResults) {
-        if (result.status === "fulfilled" && Array.isArray(result.value)) {
-          for (const stream of result.value) {
-            if (!seenUrls.has(stream.url)) {
-              seenUrls.add(stream.url);
-              allStreams.push(stream);
-            }
-          }
-        }
+      if (primary.length > 0) {
+        const primaryPromises = primary.map(
+          (server) => processServer(server, type, meta, targetSeason, targetEpisode, searchQueries)
+        );
+        const primaryResults = yield Promise.allSettled(primaryPromises);
+        collectStreams(primaryResults, allStreams, seenUrls);
       }
-      console.log(`[DhakaFlix] Discovered ${allStreams.length} stream(s)`);
+      if (allStreams.length === 0 && fallback.length > 0) {
+        if (DEBUG) {
+          console.log(`[DhakaFlix] Primary servers returned 0 streams. Querying ${fallback.length} fallback server(s)...`);
+        }
+        const fallbackPromises = fallback.map(
+          (server) => processServer(server, type, meta, targetSeason, targetEpisode, searchQueries)
+        );
+        const fallbackResults = yield Promise.allSettled(fallbackPromises);
+        collectStreams(fallbackResults, allStreams, seenUrls);
+      }
+      if (DEBUG) console.log(`[DhakaFlix] Discovered ${allStreams.length} stream(s)`);
       return allStreams;
     } catch (error) {
       console.error(`[DhakaFlix] Unexpected error in getStreams: ${error.message}`);
@@ -596,15 +813,28 @@ function getStreams(tmdbId, mediaType = "movie", season = null, episode = null) 
     }
   });
 }
+function collectStreams(settledResults, streamList, seenSet) {
+  for (const res of settledResults) {
+    if (res.status === "fulfilled" && Array.isArray(res.value)) {
+      for (const s of res.value) {
+        if (s && s.url && !seenSet.has(s.url)) {
+          seenSet.add(s.url);
+          streamList.push(s);
+        }
+      }
+    }
+  }
+}
 function processServer(server, mediaType, meta, targetSeason, targetEpisode, searchQueries) {
   return __async(this, null, function* () {
     const streams = [];
     try {
+      const searchPromises = searchQueries.map((q) => searchServer(server, q, meta.title));
+      const searchResults = yield Promise.allSettled(searchPromises);
       let searchItems = [];
-      for (const q of searchQueries) {
-        const items = yield searchServer(server, q);
-        if (items.length > 0) {
-          searchItems = searchItems.concat(items);
+      for (const res of searchResults) {
+        if (res.status === "fulfilled" && Array.isArray(res.value)) {
+          searchItems = searchItems.concat(res.value);
         }
       }
       if (searchItems.length === 0) {
@@ -631,13 +861,14 @@ function processServer(server, mediaType, meta, targetSeason, targetEpisode, sea
         );
       }
     } catch (err) {
-      console.log(`[DhakaFlix] Server ${server.name} error: ${err.message}`);
+      if (DEBUG) console.log(`[DhakaFlix] Server ${server.name} error: ${err.message}`);
     }
     return streams;
   });
 }
 function processMovieItems(server, items, meta, streams) {
   return __async(this, null, function* () {
+    const candidateFolders = [];
     for (const item of items) {
       const rawName = nameFromUrl(item.href);
       if (isVideoFile(item.href)) {
@@ -647,10 +878,21 @@ function processMovieItems(server, items, meta, streams) {
         continue;
       }
       const isFolder = item.size == null || item.href.endsWith("/");
-      if (isFolder) {
-        if (isTitleMatch(rawName, meta.title, meta.year, "movie")) {
-          const dir = yield fetchDirectoryEntries(server, item.href);
-          for (const file of dir.files) {
+      if (isFolder && isTitleMatch(rawName, meta.title, meta.year, "movie")) {
+        candidateFolders.push({
+          href: item.href,
+          name: rawName,
+          score: scoreMatch(rawName, meta.title, meta.year)
+        });
+      }
+    }
+    const topFolders = candidateFolders.sort((a, b) => b.score - a.score).slice(0, 3);
+    if (topFolders.length > 0) {
+      const dirPromises = topFolders.map((f) => fetchDirectoryEntries(server, f.href));
+      const dirResults = yield Promise.allSettled(dirPromises);
+      for (const res of dirResults) {
+        if (res.status === "fulfilled" && res.value && Array.isArray(res.value.files)) {
+          for (const file of res.value.files) {
             if (isVideoFile(file.href)) {
               addStreamResult(server, streams, file.name, file.href);
             }
@@ -663,46 +905,74 @@ function processMovieItems(server, items, meta, streams) {
 function processTvItems(server, items, meta, targetSeason, targetEpisode, streams) {
   return __async(this, null, function* () {
     for (const item of items) {
-      const rawName = nameFromUrl(item.href);
       if (isVideoFile(item.href)) {
+        const rawName = nameFromUrl(item.href);
         if (matchesEpisodeFile(rawName, targetSeason, targetEpisode, false) && isTitleMatch(rawName, meta.title, null, "tv")) {
           addStreamResult(server, streams, rawName, item.href);
         }
-        continue;
       }
+    }
+    if (streams.length > 0) {
+      return;
+    }
+    const matchingSeasonFolders = [];
+    const candidateShowFolders = [];
+    for (const item of items) {
       const isFolder = item.size == null || item.href.endsWith("/");
       if (!isFolder) continue;
+      const rawName = nameFromUrl(item.href);
       if (matchesSeasonFolder(rawName, targetSeason) && isTitleMatch(item.href, meta.title, null, "tv")) {
-        const seasonEntries = yield fetchDirectoryEntries(server, item.href);
-        matchAndAddEpisode(
-          server,
-          streams,
-          seasonEntries.files,
-          targetSeason,
-          targetEpisode,
-          true
-        );
+        matchingSeasonFolders.push({ href: item.href, name: rawName });
         continue;
       }
       if (isTitleMatch(rawName, meta.title, null, "tv")) {
-        const showEntries = yield fetchDirectoryEntries(server, item.href);
-        const matchingSeasonFolder = showEntries.folders.find(
-          (f) => matchesSeasonFolder(f.name, targetSeason)
-        );
-        if (matchingSeasonFolder) {
-          const seasonEntries = yield fetchDirectoryEntries(
-            server,
-            matchingSeasonFolder.href
-          );
+        candidateShowFolders.push({
+          href: item.href,
+          name: rawName,
+          score: scoreMatch(rawName, meta.title, meta.year)
+        });
+      }
+    }
+    if (matchingSeasonFolders.length > 0) {
+      const seasonPromises = matchingSeasonFolders.slice(0, 2).map(
+        (sf) => fetchDirectoryEntries(server, sf.href)
+      );
+      const seasonResults = yield Promise.allSettled(seasonPromises);
+      for (const res of seasonResults) {
+        if (res.status === "fulfilled" && res.value && Array.isArray(res.value.files)) {
           matchAndAddEpisode(
             server,
             streams,
-            seasonEntries.files,
+            res.value.files,
             targetSeason,
             targetEpisode,
             true
           );
-        } else if (showEntries.folders.length === 0 && showEntries.files.length > 0) {
+        }
+      }
+      return;
+    }
+    const topShowFolders = candidateShowFolders.sort((a, b) => b.score - a.score).slice(0, 2);
+    if (topShowFolders.length > 0) {
+      const showPromises = topShowFolders.map(
+        (sf) => fetchDirectoryEntries(server, sf.href)
+      );
+      const showResults = yield Promise.allSettled(showPromises);
+      const seasonFolderFetchPromises = [];
+      for (const res of showResults) {
+        if (res.status !== "fulfilled" || !res.value) continue;
+        const showEntries = res.value;
+        const matchingSeason = (showEntries.folders || []).find(
+          (f) => matchesSeasonFolder(f.name, targetSeason)
+        );
+        if (matchingSeason) {
+          seasonFolderFetchPromises.push(
+            fetchDirectoryEntries(server, matchingSeason.href).then((sEntries) => ({
+              files: sEntries.files,
+              isInSeasonFolder: true
+            }))
+          );
+        } else if ((!showEntries.folders || showEntries.folders.length === 0) && showEntries.files && showEntries.files.length > 0) {
           matchAndAddEpisode(
             server,
             streams,
@@ -711,23 +981,32 @@ function processTvItems(server, items, meta, targetSeason, targetEpisode, stream
             targetEpisode,
             false
           );
-        } else if (showEntries.folders.length > 0 && targetSeason <= showEntries.folders.length) {
+        } else if (showEntries.folders && showEntries.folders.length >= targetSeason) {
           const sortedFolders = showEntries.folders.slice().sort(
             (a, b) => a.name.localeCompare(b.name, void 0, { numeric: true })
           );
           const indexedFolder = sortedFolders[targetSeason - 1];
           if (indexedFolder) {
-            const seasonEntries = yield fetchDirectoryEntries(
-              server,
-              indexedFolder.href
+            seasonFolderFetchPromises.push(
+              fetchDirectoryEntries(server, indexedFolder.href).then((sEntries) => ({
+                files: sEntries.files,
+                isInSeasonFolder: true
+              }))
             );
+          }
+        }
+      }
+      if (seasonFolderFetchPromises.length > 0) {
+        const seasonResults = yield Promise.allSettled(seasonFolderFetchPromises);
+        for (const res of seasonResults) {
+          if (res.status === "fulfilled" && res.value && Array.isArray(res.value.files)) {
             matchAndAddEpisode(
               server,
               streams,
-              seasonEntries.files,
+              res.value.files,
               targetSeason,
               targetEpisode,
-              true
+              res.value.isInSeasonFolder
             );
           }
         }
