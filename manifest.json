@@ -1,0 +1,57 @@
+{
+  "manifestVersion": 1,
+  "name": "DhakaFlix BDIX Repository",
+  "version": "1.0.0",
+  "description": "Native Nuvio media provider repository for DhakaFlix BDIX media servers (14, 12, 9, 7).",
+  "author": "Antigravity",
+  "scrapers": [
+    {
+      "id": "bdix-dhakaflix",
+      "name": "DhakaFlix",
+      "description": "DhakaFlix high-speed BDIX media server cluster (Servers 14, 12, 9, 7) with dual audio and multi-quality support",
+      "version": "1.0.0",
+      "author": "Antigravity",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/bdix-dhakaflix.js",
+      "enabled": true,
+      "formats": [
+        "mkv",
+        "mp4"
+      ],
+      "logo": "https://raw.githubusercontent.com/redowan99/Redowan-CloudStream/master/BdixDhakaFlix/icon.jpg",
+      "contentLanguage": [
+        "bn",
+        "en",
+        "hi"
+      ]
+    }
+  ],
+  "providers": [
+    {
+      "id": "bdix-dhakaflix",
+      "name": "DhakaFlix",
+      "description": "DhakaFlix high-speed BDIX media server cluster (Servers 14, 12, 9, 7) with dual audio and multi-quality support",
+      "version": "1.0.0",
+      "author": "Antigravity",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/bdix-dhakaflix.js",
+      "enabled": true,
+      "formats": [
+        "mkv",
+        "mp4"
+      ],
+      "logo": "https://raw.githubusercontent.com/redowan99/Redowan-CloudStream/master/BdixDhakaFlix/icon.jpg",
+      "contentLanguage": [
+        "bn",
+        "en",
+        "hi"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "name": "nuvio-provider-bdix-dhakaflix",
+  "version": "1.0.0",
+  "description": "Native Nuvio media streaming provider for DhakaFlix BDIX servers ported from CloudStream",
+  "main": "providers/bdix-dhakaflix.js",
+  "scripts": {
+    "build": "node build.js",
+    "build:min": "node build.js --minify",
+    "test": "node test.js"
+  },
+  "keywords": [
+    "nuvio",
+    "nuviotv",
+    "nuviomobile",
+    "bdix",
+    "dhakaflix",
+    "cloudstream",
+    "streaming",
+    "plugin"
+  ],
+  "author": "Antigravity",
+  "license": "GPL-3.0",
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

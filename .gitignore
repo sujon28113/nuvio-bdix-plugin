@@ -1,0 +1,18 @@
+# Node modules & dependencies
+node_modules/
+package-lock.json
+
+# Environment files
+.env
+.env.*
+
+# Temporary inspection directory
+temp_inspect/
+
+# System / logs
+.system_generated/
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
